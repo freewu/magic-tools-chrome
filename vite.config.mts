@@ -1,7 +1,8 @@
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, extname, join, resolve } from 'node:path';
 import { createLogger, defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
+import { buildBrandAssets } from './scripts/icon.mjs';
 
 // ---------------- 构建日志降噪 (仅过滤第三方包的两条固定告警) ----------------
 const THIRD_PARTY_NOISE = [
@@ -148,9 +149,56 @@ const vditorAssets = (): Plugin => {
   };
 };
 
+// ---------------- 品牌图标 (assets/logo.png 为唯一来源) ----------------
+// manifest.json 的 icons / action.default_icon 只接受位图, 且分别需要 16/32/48/128 尺寸;
+// 页面 favicon 与启动图用的是 logo.png。构建期由 assets/logo.png 一并派生出这些文件
+// (Lanczos3 缩放, 见 scripts/icon.mjs), 仓库里不再保存重复的图标文件。
+const LOGO_FILE = resolve(process.cwd(), 'assets/logo.png');
+
+/** 把 logo.png 派生的图标写进产物目录, 开发时用中间件从内存返回同一批内容 */
+const brandAssets = (): Plugin => {
+  let outDir = resolve(process.cwd(), 'dist');
+  let cache: Map<string, Buffer> | null = null;
+  const bundle = () => {
+    cache ??= buildBrandAssets(LOGO_FILE);
+    return cache;
+  };
+  return {
+    name: 'magictools-brand-assets',
+    configResolved(config) {
+      outDir = resolve(config.root, config.build.outDir);
+    },
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const path = (req.url ?? '').split('?')[0].split('#')[0].replace(/^\//, '');
+        const file = bundle().get(path);
+        if (!file) {
+          next();
+          return;
+        }
+        res.setHeader('Content-Type', 'image/png');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.end(file);
+      });
+    },
+    closeBundle() {
+      try {
+        for (const [name, content] of bundle()) {
+          const file = join(outDir, name);
+          mkdirSync(dirname(file), { recursive: true });
+          writeFileSync(file, content);
+        }
+      } catch (error) {
+        this.warn(`由 assets/logo.png 生成扩展图标失败: ${(error as Error).message}`);
+      }
+    },
+  };
+};
+
 // Chrome 扩展 (Manifest V3) 前端构建
 // - 入口 src/index.html + src/index.tsx, root 设为 src
-// - publicDir = src/public: manifest.json / background.js / 图标 / logo / emulatorjs 原样拷入产物根目录,
+// - publicDir = src/public: manifest.json / background.js / emulatorjs 原样拷入产物根目录,
+//   扩展图标与 logo.png 由 brandAssets 插件从 assets/logo.png 生成,
 //   最终 dist/ 即「可加载的扩展目录」(chrome://extensions -> 加载已解压的扩展程序)
 // - base './': chrome-extension:// 页面与任意子路径部署都能正确解析相对资源
 export default defineConfig({
@@ -158,7 +206,7 @@ export default defineConfig({
   base: './',
   customLogger: quietLogger(),
   publicDir: 'public',
-  plugins: [react(), vditorAssets()],
+  plugins: [react(), vditorAssets(), brandAssets()],
   server: {
     port: 1212,
     strictPort: true,
