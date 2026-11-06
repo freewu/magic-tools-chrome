@@ -1,0 +1,166 @@
+import { Select, Button, Input, Space, message, Row } from "antd";
+import { ArrowDownOutlined, ArrowUpOutlined } from '@ant-design/icons';
+import { useState } from "react";
+const { TextArea } = Input;
+import { copyTextToClipboard } from "../../lib"
+import { useLocale } from "../../hook/locale-context";
+import { cr, crT } from './lang';
+import { openFile } from "../../lib/file"
+import { arrayToOptions } from "../../lib/array"
+import { codeList } from "./data";
+import { getDefaultCode, getDefaultPassphrase, xxteaEncrypt, xxteaDecrypt } from "./lib";
+import { utf8ToBytes, bytesToUtf8, bytesToHex, hexToBytes, bytesToBase64, base64ToBytes } from "../../lib/codec";
+import type { InputStatus } from "antd/es/_util/statusUtils";
+
+const XXTEACrypto = () => {
+  const { locale } = useLocale();
+  const t = (zh: string) => cr(locale, zh);
+  const tt = (zh: string, v?: Record<string, string | number>) => crT(locale, zh, v);
+
+  const genDefaultPassphraseStatus = () :InputStatus => {
+    const p = getDefaultPassphrase();
+    return (16 === p.length)? '' : 'error';
+  }
+
+  const [ notice, contextHolder ] = message.useMessage();
+  const [ encodeValue, setEncodeValue ] = useState(''); // 要加密的内容
+  const [ decodeValue, setDecodeValue ] = useState(''); // 要解密的内容
+  const [ code, setCode ] = useState(getDefaultCode()); // 编码
+  const [ passphrase, setPassphrase] = useState(getDefaultPassphrase()); // 密钥 (16 字节 = 128 位)
+  const [ passphraseStatus, setPassphraseStatus ] = useState(genDefaultPassphraseStatus()); // 密钥提醒
+
+  const isCanDo = (value :string) :boolean => {
+    // 需要处理的内容为空
+    if(value.trim() === "") return false;
+    // 密钥长度不符合 (必须 16 位)
+    if('' !== passphraseStatus) return false;
+    return true;
+  }
+
+  // 加密处理
+  const encode = () => {
+    if(!isCanDo(encodeValue)) return ;
+    try {
+      const cipher = xxteaEncrypt(utf8ToBytes(encodeValue), utf8ToBytes(passphrase));
+      switch(code) {
+        case "Base64": return setDecodeValue(bytesToBase64(cipher));
+        case "HEX": return setDecodeValue(bytesToHex(cipher));
+        default: return setDecodeValue(bytesToBase64(cipher));
+      }
+    } catch (error) {
+      console.log(error);
+      notice.error(t('加密失败'));
+    }
+  };
+
+  // 解密处理
+  const decode = () => {
+    if(!isCanDo(decodeValue)) return ;
+    try {
+      // 根据编码解析密文
+      const cipher = (code === "HEX")? hexToBytes(decodeValue) : base64ToBytes(decodeValue);
+      // 解密处理
+      const result = bytesToUtf8(xxteaDecrypt(cipher, utf8ToBytes(passphrase)));
+      return setEncodeValue(result);
+    } catch (error) {
+      console.log(error);
+      notice.error(t('解密失败'));
+    }
+  };
+
+  // 清除内容 有选择变化,清除结果?
+  const clear = () => {
+    setEncodeValue('');
+    setDecodeValue('');
+  };
+
+  const textareaDoubleClick = (e :React.MouseEvent<HTMLElement>) => {
+    const txt = (e.target as HTMLInputElement).value.trim();
+    if(txt !== '') {
+      copyTextToClipboard(txt);
+      notice.success(t('复制到粘贴板成功！！！'));
+    }
+  };
+
+  // 密钥 Passphrase 输入处理 (必须 16 位)
+  const onPassphraseChange = (e :React.ChangeEvent<HTMLInputElement>) => {
+    const v = e.target.value.trim();
+    setPassphrase(v);
+    if(v.length === 16) {
+      setPassphraseStatus("");
+    } else {
+      setPassphraseStatus("error");
+    }
+  }
+
+  return (
+    <div>
+      { contextHolder }
+
+      <Row style = { { marginTop: "5px" }}>
+        <Space>
+          {t('编码:')}
+          <Select
+            value={ code }
+            style={{ width: 120 }}
+            onChange={ (v :string) => { setCode(v) } }
+            options={ arrayToOptions(codeList) }
+          />
+          {t('密钥:')}
+          <Input
+            showCount
+            allowClear
+            status={ passphraseStatus }
+            maxLength = { 16 }
+            style={ { width: 230 } }
+            onChange={ onPassphraseChange }
+            value= { passphrase } />
+        </Space>
+      </Row>
+
+      <TextArea
+        showCount
+        style={ { margin: "5px 0 5px 0" }}
+        onDoubleClick={ textareaDoubleClick }
+        onChange={ (e) => { setEncodeValue(e.target.value) } }
+        title={t('双击复制内容到粘贴板')}
+        value= { encodeValue }
+        placeholder={t('输入需要进行 XXTEA 加密的内容 或 拖拽文件到框内打开')}
+        autoSize={{ minRows: 8, maxRows: 8 }}
+        onDragOver={ (e) => { e.preventDefault(); } } // 必须加上，否则无法触发下面的方法
+        onDrop={ (e) => { e.preventDefault(); openFile(e.dataTransfer.files, setEncodeValue ); } }
+      />
+
+      <Space>
+        <Button
+          onClick={ encode }
+          style={ { "backgroundColor" : "#007bff","color": "#fff" } }
+          icon={<ArrowDownOutlined />}
+        >{t('加密')}</Button>
+        <Button
+          onClick={ decode }
+          style={ { "backgroundColor" : "#28a745","color": "#fff" } }
+          icon={<ArrowUpOutlined />}
+        >{t('解密')}</Button>
+        <Button
+          onClick={ () =>clear() }
+          style={ { "backgroundColor" : "#dc3545","color": "#fff" } }
+        >{t('清除')}</Button>
+      </Space>
+
+      <TextArea
+        showCount
+        style={ { margin: "5px 0 5px 0" }}
+        onDoubleClick={ textareaDoubleClick }
+        onChange={ (e) => { setDecodeValue(e.target.value) } }
+        title={t('双击复制内容到粘贴板')}
+        value= { decodeValue }
+        placeholder={t('输入需要进行 XXTEA 解密的内容 或 拖拽文件到框内打开')}
+        autoSize={{ minRows: 8, maxRows: 8 }}
+        onDragOver={ (e) => { e.preventDefault(); } } // 必须加上，否则无法触发下面的方法
+        onDrop={ (e) => { e.preventDefault(); openFile(e.dataTransfer.files, setDecodeValue ); } }
+      />
+    </div>
+  )
+}
+export default XXTEACrypto;

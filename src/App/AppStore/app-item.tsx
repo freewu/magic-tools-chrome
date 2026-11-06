@@ -1,0 +1,95 @@
+import { Space, Tooltip } from "antd";
+import React,{ useState, useContext } from "react";
+import { useNavigate } from "react-router-dom"
+import "./appstore.css"
+import Icon from '@ant-design/icons';
+import { DesktopOutlined, GlobalOutlined, StarFilled, StarOutlined } from "@ant-design/icons";
+import { appIconOf } from "../app-icons";
+import { AppContext } from "../../hook/app-context";
+import { useLocale } from "../../hook/locale-context";
+import { tr } from "../../i18n/lang";
+import { useFavorites } from "../../hook/use-favorites";
+import { toggleFavorite } from "../../lib/favorite";
+import appstoreLang from "./lang";
+
+export type AppItemProps = {
+  uri: string, // 
+  icon: string, // antd 图标名 (define.tsx 的 Icon, 由 app-icons.ts 映射为组件)
+  label: string,
+  desktop?: boolean, // 扩展版不可用 (浏览器沙箱无法提供该能力)
+  web?: boolean, // 仅 Web 版可用 (保留字段: 扩展版内无此类工具)
+  isNew?: boolean, // 新版本新增的应用 (展示 NEW 徽标)
+}
+
+const AppItem = ({ uri, label, icon, desktop, web, isNew } :AppItemProps) => {
+
+  const AppIcon = appIconOf(icon);
+
+  const navigate = useNavigate();
+  const { app, setApp } = useContext(AppContext)!
+  const { locale } = useLocale();
+  const favorites = useFavorites();
+  const faved = favorites.includes(uri);
+
+  const colClick = ( e:any ) => {
+    const uri = e.currentTarget.getAttribute('data-uri');
+    // 左边栏需要选中相关应用
+    setApp(uri);
+    navigate("/" + uri, { replace: true })
+  }
+
+  // 星标点击: 收藏 / 取消收藏 (阻止冒泡, 不触发卡片跳转)
+  const onStarClick = ( e:React.MouseEvent ) => {
+    e.stopPropagation();
+    e.preventDefault();
+    toggleFavorite(uri);
+  }
+
+  return (
+    <div className="app" onClick={ colClick } data-uri={ uri }>
+      {/* 扩展版不可用标识 (页面内会给出原因提示并禁用请求按钮) */}
+      { desktop && (
+        <Tooltip title={ tr(appstoreLang, locale, 'desktopOnly', '扩展版不可用') }>
+          <span className="app-desktop-badge">
+            <DesktopOutlined />
+            <span className="app-desktop-badge-text">{ tr(appstoreLang, locale, 'desktopOnly', '扩展版不可用') }</span>
+          </span>
+        </Tooltip>
+      ) }
+      {/* 仅 Web 标识 (桌面版内嵌 WebView 无法提供该能力, 页面内会给出提示并禁用录制按钮) */}
+      { web && (
+        <Tooltip title={ tr(appstoreLang, locale, 'webOnly', '仅 Web') }>
+          <span className="app-web-badge">
+            <GlobalOutlined />
+            <span className="app-web-badge-text">{ tr(appstoreLang, locale, 'webOnly', '仅 Web') }</span>
+          </span>
+        </Tooltip>
+      ) }
+      {/* 收藏星标: 卡片右上角, 点击收藏 / 取消收藏 */}
+      <Tooltip title={ tr(appstoreLang, locale, faved ? 'unfavorite' : 'favorite', faved ? '取消收藏' : '收藏') }>
+        <button
+          type="button"
+          className={ 'app-star' + (faved ? ' app-star-on' : '') }
+          aria-label={ tr(appstoreLang, locale, faved ? 'unfavorite' : 'favorite', faved ? '取消收藏' : '收藏') }
+          aria-pressed={ faved }
+          onClick={ onStarClick }
+          onPointerDown={ (e) => e.stopPropagation() }
+        >
+          { faved ? <StarFilled /> : <StarOutlined /> }
+        </button>
+      </Tooltip>
+      {/* NEW 徽标: 新版本新增的应用, 下个版本新增应用时从这里撤下 (见 define.tsx 的 IsNew) */}
+      { isNew && (
+        <Tooltip title={ tr(appstoreLang, locale, 'newTip', '新上线') }>
+          <span className="app-new-badge">NEW</span>
+        </Tooltip>
+      ) }
+      <Space className="app-name" size={ 4 }>
+        <AppIcon className="app-icon" style={ { fontSize: 13 } } />
+        { label }
+      </Space>
+    </div>
+  );
+}
+
+export default AppItem;

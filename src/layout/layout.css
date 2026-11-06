@@ -1,0 +1,196 @@
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+#root,
+body,
+html {
+  height: 100%;
+  overflow-y: hidden;
+}
+
+/* 全局文字色跟随主题 (深色模式防黑字看不见) */
+html,
+body {
+  background-color: var(--app-bg, #f0f2f5);
+  color: var(--app-text, rgba(0, 0, 0, 0.88));
+}
+
+/* 原生表单控件 (非 antd) 跟随主题 */
+input,
+textarea,
+select {
+  color: var(--app-text, rgba(0, 0, 0, 0.88));
+  background-color: var(--app-input-bg, #ffffff);
+}
+
+.ant-layout {
+  display: flex;
+  width: 100%;
+  min-height: 100%;
+}
+
+.ant-layout-sider-dark {
+  min-width: 90px !important;
+}
+
+/* 左右两栏分隔拖拽条: 贴着侧边栏右边缘 (不超出边栏, 避免被裁剪), 拖动改宽度 */
+.sider-resizer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 6px;
+  z-index: 20;
+  cursor: col-resize;
+  /* 默认一条很淡的分隔线 (提示此处可拖), 悬停/拖动时高亮 */
+  background: rgba(255, 255, 255, 0.10);
+  transition: background 0.15s;
+  /* 触摸拖动时不滚动页面 */
+  touch-action: none;
+}
+
+.sider-resizer:hover,
+.sider-resizer:focus-visible,
+.sider-resizer-active {
+  background: rgba(22, 119, 255, 0.65);
+  outline: none;
+}
+
+/* 拖动中: 全局列宽光标 + 禁止选中文字 */
+body.sider-resizing,
+body.sider-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+/* 拖动中关闭侧边栏的宽度过渡, 否则跟手会有延迟感 (收起/展开动画不受影响) */
+body.sider-resizing .ant-layout-sider {
+  transition: none !important;
+}
+
+/* 内容区顶部: 最近打开应用标签 + 面包屑 */
+.page-head {
+  margin: 12px 12px 0 12px;
+  min-width: 0;
+}
+
+/* 去掉卡片标签默认的下边距, 与面包屑紧凑排列 */
+.page-head .page-tabs .ant-tabs-nav {
+  margin: 0;
+}
+
+/* Tab 可见度: 默认做透明的“胶囊”边框, 悬停显示边框, 激活时浅色/深色均以高亮面板+描边突出 */
+.page-head .page-tabs.ant-tabs-card .ant-tabs-nav .ant-tabs-tab {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  transition: all 0.2s;
+}
+.page-head .page-tabs.ant-tabs-card .ant-tabs-nav .ant-tabs-tab:hover {
+  border-color: var(--app-border, rgba(5, 5, 5, 0.12));
+  background: var(--app-raised, #ffffff);
+}
+.page-head .page-tabs.ant-tabs-card .ant-tabs-nav .ant-tabs-tab.ant-tabs-tab-active {
+  background: var(--app-raised, #ffffff);
+  border-color: var(--app-border, rgba(5, 5, 5, 0.12));
+  box-shadow: 0 -1px 4px rgba(0, 0, 0, 0.05);
+}
+.page-head .page-tabs.ant-tabs-card .ant-tabs-nav .ant-tabs-tab.ant-tabs-tab-active .ant-tabs-tab-btn {
+  font-weight: 600;
+}
+.page-head .page-tabs.ant-tabs-card .ant-tabs-nav .ant-tabs-tab-btn {
+  font-weight: 400;
+  color: var(--app-text, rgba(0, 0, 0, 0.88));
+}
+.page-head .page-tabs.ant-tabs-nav::before {
+  border-bottom: none;
+}
+.page-head .page-tabs.ant-tabs-card .ant-tabs-nav .ant-tabs-tab .ant-tabs-tab-remove {
+  color: var(--app-text, rgba(0, 0, 0, 0.88));
+}
+.page-head .page-tabs.ant-tabs-card .ant-tabs-nav .ant-tabs-tab .ant-tabs-tab-remove:hover {
+  color: #ff4d4f;
+}
+
+.page-head .page-breadcrumb {
+  margin: 8px 4px 12px 4px;
+}
+
+/* 无面包屑的内置页面 (应用中心 / 设置 / 帮助): 标签下方补上与面包屑相当的间距 */
+.page-head--no-crumb {
+  margin-bottom: 12px;
+}
+
+/* 多标签保活: 所有已打开标签的页面保持挂载, 仅当前页显示
+   (切换 Tab 不销毁页面组件, 填写的数据不丢失) */
+.keep-alive {
+  height: 100%;
+}
+.keep-alive .keep-alive-item {
+  height: 100%;
+}
+
+/* 折叠侧栏时分类子菜单的飞出浮层: 子项较多时保证列表在视口内可滚动
+   (与 submenu-placements.ts 的 shiftY 配合, 浮层整体平移进视口后底部子项不再被裁掉) */
+.ant-menu-submenu-popup .ant-menu-sub.ant-menu-vertical {
+  max-height: calc(100vh - 100px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* 侧边菜单分类标题: 应用数徽标与分类名同行右侧对齐 */
+.menu-group-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.menu-group-label .ant-badge {
+  flex-shrink: 0;
+}
+
+/* ---- 滚动条美化 (Chromium/WebView2, Firefox scrollbar-width) ---- */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0.35);
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(128, 128, 128, 0.65);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(128, 128, 128, 0.5) transparent;
+}
+/* ---- 侧栏底部版本号: 有新版本时的呼吸角标 ---- */
+.update-badge-dot {
+  box-shadow: 0 0 0 0 rgba(255, 77, 79, 0.7);
+  animation: update-badge-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+@keyframes update-badge-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 77, 79, 0.7);
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgba(255, 77, 79, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 77, 79, 0);
+  }
+}

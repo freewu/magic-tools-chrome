@@ -1,0 +1,222 @@
+import { Checkbox, Divider, Button,Input, Space, message, Select } from "antd";
+import { useState } from "react";
+const { TextArea } = Input;
+import { copyTextToClipboard, debounce } from "./../../lib";
+import { arrayToOptions } from "./../../lib/array";
+import { format } from 'sql-formatter';
+import { saveTextFile } from "../../lib/bridge";
+import type { FormatOptionsWithLanguage,IndentStyle, KeywordCase, CommaPosition, LogicalOperatorNewline } from 'sql-formatter';
+import { languageList, keywordCaseList,indentStyleList,commaPositionList,logicalOperatorNewlineList } from "./data";
+import { useLocale } from '../../hook/locale-context';
+import { u, uT } from './lang';
+
+// 代码高亮 (按需: 仅注册 SQL 语言, 避免整库 190+ 语言全部打包)
+import 'highlight.js/styles/monokai-sublime.css';
+import sqlLang from 'highlight.js/lib/languages/sql'; // 根包 types 提供通配子路径声明
+import highlight from 'highlight.js/lib/core';
+highlight.registerLanguage('sql', sqlLang);
+import './sql-formatter.css';
+
+const URL = () => {
+  const { locale } = useLocale();
+  const t = (zh: string) => u(locale, zh);
+  const tt = (zh: string, v?: Record<string, string | number>) => uT(locale, zh, v);
+  // highlight配置
+  //highlight.configure({ useBR: true});
+
+  // 输出结果框高度,窗口调整,颜色板高度也需要调整
+  const genResultHeight = () => {
+    return (window.innerHeight - 380) + "px";
+  };
+
+  let inputElement :HTMLInputElement;
+  const [ value, setValue ] = useState(''); // 输入的 SQl 语言
+  const [ highLightResult, setHighLightResult ] = useState(''); // 语法高亮后的结果
+  const [ result, setResult ] = useState(''); // 格式化后的结果
+  const [ notice, contextHolder ] = message.useMessage();
+  const [ language, setLanguage ] = useState('mysql'); // 语言类型
+  const [ keywordCase, setKeywordCase ] = useState('upper'); // 关键词大小写类型
+  const [ indentStyle, setIndentStyle ] = useState('standard'); // 缩进类型
+  // const [ useTab, setUseTab ] = useState(false); // 使用 tab
+  // const [ tabWidth, setTabWidth ] = useState(4); // tab 宽度  (等于多个空格)
+  const [ resultHight, setResultHight ] = useState(genResultHeight()); // 结果框高度
+
+  // 窗体大小发生变化,改变窗口大小
+  window.addEventListener('resize',
+    debounce(() => { setResultHight(genResultHeight()) }, 100)
+  );
+
+  const textareaDoubleClick = (e :React.MouseEvent<HTMLElement>) => {
+    if(result.trim() === "") return ;
+    copyTextToClipboard(result);
+    notice.success(t("复制到粘贴板成功！！！"));
+  };
+
+  // 保存格式化结果为 .sql 文件
+  const saveSql = async () => {
+    if (result.trim() === '') {
+      notice.warning(t('请先输入 SQL 语句进行格式化'));
+      return;
+    }
+    try {
+      const saved = await saveTextFile('formatted.sql', result, t('保存 SQL 文件'), { filterName: t('SQL 文件'), extensions: ['sql'] });
+      if (saved) notice.success(t('已保存 SQL 文件'));
+    } catch (err) {
+      notice.error(tt('保存失败: {m}', { m: (err as Error).message }));
+    }
+  };
+
+  const onTextAreaChange = (e :React.ChangeEvent<HTMLTextAreaElement>) => {
+    setValue(e.target.value);
+    doFormatter(e.target.value,genConfig());
+  }
+
+  const doFormatter = (value:string,config :FormatOptionsWithLanguage) => {
+    value = value.trim();
+    if ('' === value) {
+      setResult('');
+      setHighLightResult('');
+      return;
+    }
+    try {
+      const r = format(value, config);
+      setResult( r );
+      setHighLightResult( highlight.highlight(r,{language: 'sql'}).value );
+    } catch (e) {
+      console.log(e);
+    }
+  }
+
+  // 生成 format 配置
+  const genConfig = (key:string = '', value:any = null): FormatOptionsWithLanguage => {
+    let config: FormatOptionsWithLanguage = {
+      language: (('language' == key)? value : language),
+      keywordCase: (('keywordCase' == key)? value : keywordCase) as KeywordCase,
+      indentStyle: (('indentStyle' == key)? value : indentStyle) as IndentStyle,
+      // tabWidth: 2,
+      // useTabs: true,
+    };
+    return config;
+  }
+
+  // 打开本地 SQL 文件 
+  const fileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files || [];
+    openFile(files);
+  };
+
+  const openFile = (files :any) => {
+    if(0 === files.length) {
+      // notice.error("请选择文件！！！");
+      return;
+    }
+    // 只打开 .sql结尾的文件
+    if(!/.*\.sql$/.test(files[0]['name'])) return ;
+
+    const reader = new FileReader();
+    // 加载失败
+    reader.onerror = (err) => {
+      console.log(err);
+    }
+    // 文件加载完毕
+    reader.onload = () => {
+      setValue(reader.result as string);
+      doFormatter(reader.result as string, genConfig());
+    }
+    reader.readAsText(files[0]);
+  };
+
+  /**
+  export interface FormatOptions {
+      tabWidth: number;
+      useTabs: boolean;
+      keywordCase: KeywordCase;
+      indentStyle: IndentStyle;
+      logicalOperatorNewline: LogicalOperatorNewline;
+      tabulateAlias: boolean;
+      commaPosition: CommaPosition;
+      expressionWidth: number;
+      linesBetweenQueries: number;
+      denseOperators: boolean;
+      newlineBeforeSemicolon: boolean;
+  }
+  */
+
+  return (
+    <div>
+      {contextHolder}
+
+      <Space>
+        <Button 
+          onClick={ () => { setResult(''); setValue(''); setHighLightResult(''); } }
+          style={ {"backgroundColor" : "#dc3545","color": "#fff" }} 
+        >{t('清除')}</Button>
+        <label>{t('语言类型:')}</label>
+        <Select
+          value={ language }
+          style={{ width: 120 }}
+          onChange={ (v :string) => { setLanguage(v); doFormatter(value,genConfig('language',v)) } }
+          options={ arrayToOptions(languageList) }
+        />
+        <label>{t('关键字格式:')}</label>
+        <Select
+          value={ keywordCase }
+          style={{ width: 100 }}
+          onChange={ (v :string) => { setKeywordCase(v); doFormatter(value,genConfig('keywordCase',v)) } }
+          options={ arrayToOptions(keywordCaseList) }
+        />
+        <label>{t('对齐方式:')}</label>
+        <Select
+          value={ indentStyle }
+          style={{ width: 100 }}
+          onChange={ (v :string) => { setIndentStyle(v); doFormatter(value,genConfig('indentStyle',v)) } }
+          options={ arrayToOptions(indentStyleList) }
+        />
+        <Button 
+          onClick={ saveSql }
+          style={ { backgroundColor: "#17a2b8", color: "#fff" } } 
+        >{t('保存为 .sql')}</Button>
+        <Button 
+          onClick={ ()=> { inputElement?.click() } }
+          style={ { backgroundColor: "#007bff", color: "#fff" } } 
+        >{t('打开 SQL 文件')}</Button>
+        <input 
+          onChange={ fileChange }
+          ref={ input => inputElement = input as HTMLInputElement }
+          type="file" id="fileInput" style={ { display: 'none'}} accept=".sql" />
+      </Space>
+
+      <TextArea
+        onDragOver={ (e) => { e.preventDefault(); } } // 必须加上，否则无法触发下面的方法
+        onDrop={ (e) => { e.preventDefault(); openFile(e.dataTransfer.files); } }
+        style={ { margin: "12px 0 5px 0" }}
+        onChange={ onTextAreaChange }
+        value= { value }
+        placeholder={t('输入需要格式化的 SQL 语句 或 拖拽 .sql 文件到框内')}
+        autoSize={{ minRows: 5,maxRows: 5}}
+      />
+
+      <Divider dashed />
+
+      <div
+        style={ { height: resultHight }}
+        title={t('点击复制内容到粘贴板')}
+        onClick={ textareaDoubleClick }
+        className="code-output">
+        <pre dangerouslySetInnerHTML={ { __html : highLightResult } } />
+      </div>
+      
+      {/* <TextArea
+        style={ { margin: "5px 0 5px 0" }}
+        onDoubleClick={ textareaDoubleClick }
+        title="双击复制内容到粘贴板"
+        value= { result }
+        placeholder="格式化后的 SQL 语句"
+        autoSize={{ minRows: 17}}
+      /> */}
+      
+    </div>
+  );
+}
+
+export default URL;

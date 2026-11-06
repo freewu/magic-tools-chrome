@@ -1,0 +1,314 @@
+// 分类图标: 侧边栏(尤其折叠时)展示用
+import { SwapOutlined, CodeOutlined, LockOutlined, CalculatorOutlined, GlobalOutlined, EllipsisOutlined, FormatPainterOutlined, PictureOutlined, AppstoreAddOutlined, TrophyOutlined } from '@ant-design/icons';
+import { Badge } from 'antd';
+import type { ReactNode } from 'react';
+
+const list = [
+  'Hash',
+  'HmacHash',
+  'SHA3Hash',
+  'KeccakHash',
+  'BcryptCalc',
+  'ScryptCalc',
+  'Base64',
+  'URL',
+  'Time',
+  'Color',
+  'ColorConvert',
+  'NumberConvert',
+  'TreePathConvert',
+  'QRCodeGenerator',
+  'BarcodeGenerator',
+  'PasswordGenerator',
+  'OTPGenerator',
+  'HtpasswdGenerator',
+  'MockData',
+  'DotMatrixFont',
+  'SudokuGenerator',
+  'CopybookGenerator',
+  'ChatGenerator',
+  'CronRules',
+  'GitignoreGenerator',
+  'Whiteboard',
+  'BeadPatternGenerator',
+  'FakeMeeting',
+  'AESCrypto',
+  'RSACrypto',
+  'SM2Crypto',
+  'SM4Crypto',
+  'SM9Crypto',
+  'CaesarCrypto',
+  'RailFenceCrypto',
+  'VigenereCrypto',
+  'HillCrypto',
+  'CiscoType7',
+  'LineCount',
+  'Unicode',
+  'Punycode',
+  'UUencode',
+  'XXencode',
+  'BCDCodec',
+  'MorseCodec',
+  'JWTDecoder',
+  'BasicAuthCodec',
+  'DESCrypto',
+  'BlowfishCrypto',
+  'RabbitCrypto',
+  'ZucCrypto',
+  'RC2Crypto',
+  'RC4Crypto',
+  'RC5Crypto',
+  'RC6Crypto',
+  'ChaCha20Crypto',
+  'TripleDESCrypto',
+  'TEACrypto',
+  'XTEACrypto',
+  'XXTEACrypto',
+  'BaseXCodec',
+  'Base58Codec',
+  'GzipCodec',
+  'PBKDF2Calc',
+  'CMACCalc',
+  'HKDFCalc',
+  'KMACCalc',
+  'PPICalc',
+  'ComplementCalc',
+  'IPConvert',
+  'BCCCheck',
+  'LRCCheck',
+  'CRCCheck',
+  'Base64Image',
+  'GPSConvert',
+  'LatLngConvert',
+  'DownloadLinkConvert',
+  'RMBConvert',
+  'ByteConvert',
+  'PinyinConvert',
+  'TemperatureConvert',
+  'DistanceConvert',
+  'ConfigConvert',
+  'SubtitleConvert',
+  'SpeedConvert',
+  'VolumeConvert',
+  'AreaConvert',
+  'WeightConvert',
+  'RegexTester',
+  'MarkdownEditor',
+  'MermaidEditor',
+  'MindMap',
+  'VditorMarkdown',
+  'JsonFormatter',
+  'JSON5Formatter',
+  'JsFormatter',
+  'SQLFormatter',
+  'XmlFormatter',
+  'HtmlFormat',
+  'SvgFormat',
+  'CnEnSpacing',
+  'FileDiff',
+  'KeyboardKeyInfo',
+  'Chmod',
+  'AsciiImageGenerator',
+  'ImageColor',
+  'ImageSplit',
+  'ImageResize',
+  'ImageWatermark',
+  'ImageNegative',
+  'ImageGrayscale',
+  'ImageSharpen',
+  'ImageColorPicker',
+  'ImageToSvg',
+  'PixelArt',
+  'GifSplit',
+  'GifGenerator',
+  'AsciiTextArt',
+  'HtmlStripText',
+  'CodeShot',
+  'IcoGenerator',
+  'AppIconGenerator',
+  'PlaceholderImage',
+  'ShieldBadgeGenerator',
+  'CIDRCalc',
+  'BrowserFingerprint',
+  'UrlExtract',
+  'CookieAnalyzer',
+  'UserAgentParser',
+  'SitemapCheck',
+  'KeywordDensity',
+  'WebTDKCheck',
+  'DnsQuery',
+  'RobotsTxtGenerator',
+  'CSRGenerator',
+  'WebSocketDebug',
+  'IptablesRules',
+  'TcRules',
+  'NginxConfig',
+  'JSONLConvert',
+  'Teleprompter',
+  'BOMCheck',
+  'Metronome',
+  'ZipCompress',
+  'ZipExtract',
+  'ScreenRecorder',
+  'QrDecode',
+  'SensitiveWord',
+  'GridPaper',
+  'Pomodoro',
+  'Game2048',
+  'Tetris',
+  'NesEmulator',
+  'Minesweeper',
+  'GameBoy',
+  'FreeCell',
+  'SpiderSolitaire',
+  'SegaEmulator',
+  'Snake',
+];
+
+import { defineLoader } from './app-modules';
+import { APP_TYPES } from './app-types';
+
+// 加载 App 的定义 名称 / icon 
+// Desktop: 仅桌面版可用的应用 (浏览器演示版下页面内提示并禁用请求按钮, 应用中心展示「仅桌面版」标识)
+// Web:     仅 Web 版可用的应用 (桌面版内嵌 WebView 无法提供该能力, 应用中心展示「仅 Web」标识)
+// IsNew:   新版本新增的应用 (应用中心展示 NEW 徽标; 下次新增应用时记得把上一个改回 false)
+type DefineModule = { AppName :string; Icon :string; Type :string; Desktop :boolean; Web :boolean; IsNew :boolean };
+const loadAppDefine = async (app :string) :Promise<DefineModule | null> => {
+  try {
+    const m = await defineLoader(app)?.();
+    if (!m) return null;
+    return {
+      AppName: String(m.AppName ?? ''),
+      Icon: String(m.Icon ?? ''),
+      Type: String(m.Type ?? ''),
+      Desktop: m.Desktop === true,
+      Web: m.Web === true,
+      IsNew: m.IsNew === true,
+    };
+  } catch (err) {
+    console.log(err);
+    return null;
+  }
+}
+
+export type AppItem = {
+  key: string, // app 编号 也是导航的 url 地址
+  icon: string, // app icon 图标名 (antd 图标名, 不含 Outlined 后缀; 由 app-icons.ts 映射为组件)
+  "label": string, // app 名称
+  type: string, // app 类型 
+  desktop: boolean, // 是否仅桌面版可用
+  web: boolean, // 是否仅 Web 版可用 (桌面版无法提供)
+  isNew: boolean, // 是否为新版本新增应用 (应用中心展示 NEW 徽标)
+}
+
+// 获取 App 列表: 并行加载所有 define, 全部就绪后按 list 顺序返回。
+// (原实现只 await 最后一项的加载, 存在竞态: 靠后位置的 App 可能因加载完成晚于最后一项而丢失, 表现为菜单/页面打不开)
+const getAppList = async () :Promise<Array<AppItem>> => {
+  const mods = await Promise.all(list.map((item) => loadAppDefine(item)));
+  const result:Array<AppItem> = [];
+  mods.forEach((m, i) => {
+    if(m) {
+      // icon 是 antd 图标名 (define.tsx 的 Icon), 渲染时经 app-icon.ts 的 appIconNode / appIconOf 转成组件
+      result.push({ key: list[i], icon: m.Icon, label: m.AppName, type: m.Type, desktop: m.Desktop, web: m.Web, isNew: m.IsNew });
+    }
+  });
+  return result;
+}
+
+const appList = await getAppList();
+
+// 生成 menu
+export const genMenuList = (appList :Array<AppItem>) => {
+  type MenuGroup = { key: string; label: ReactNode; icon: ReactNode; children: AppItem[]; name: string };
+  // 菜单分组 key/icon 与 App define 中的 Type 对应; 顺序与默认名称取自 APP_TYPES (单一来源)
+  // name: 分类纯文本名称 (供面包屑等非菜单场景使用, label 会在下方升级为含数量徽标的 ReactNode)
+  const MENU_ICONS: Record<string, ReactNode> = {
+    'convert': <SwapOutlined />,
+    'codec': <CodeOutlined />,
+    'crypto': <LockOutlined />,
+    'value-calc': <CalculatorOutlined />,
+    'formatter': <FormatPainterOutlined />,
+    'image': <PictureOutlined />,
+    'generator': <AppstoreAddOutlined />,
+    'game': <TrophyOutlined />,
+    'webmaster': <GlobalOutlined />,
+    'misc': <EllipsisOutlined />,
+  };
+  let menuList = new Map<string, MenuGroup>(
+    APP_TYPES.map(({ key, name }) => [ key, { key, label: name, name, icon: MENU_ICONS[key], children: new Array<AppItem>() } ])
+  );
+
+  // todo 收藏
+  // 按 app type 分类
+  for(let item of appList) {
+    if(menuList.has(item.type)) {
+      let v = menuList.get(item.type);
+      v?.children?.push(item)
+      if(v !== undefined) menuList.set(item.type,v);
+    }
+  }
+  // 分类应用数徽标: 菜单展开时各分类标题右侧显示所属应用数量
+  for (const g of menuList.values()) {
+    const count = g.children.length;
+    g.label = (
+      <span className="menu-group-label">
+        <span>{ g.label }</span>
+        { count > 0 && <Badge count={ count } size="small" overflowCount={ 999 } style={ { backgroundColor: '#1677ff' } } /> }
+      </span>
+    );
+  }
+  return Array.from(menuList.values());
+}
+
+// 定义 App
+// const appList = [
+//   {
+//     key: 'Hash',
+//     icon: "",
+//     label: 'Hash 值计算',
+//   },
+//   {
+//     key: 'Base64',
+//     icon: "",
+//     label: 'Base64 编解码',
+//   },
+//   {
+//     key: 'URL',
+//     icon: "",
+//     label: 'URL 编解码',
+//   },
+//   {
+//     key: 'Time',
+//     icon: "",
+//     label: '时间戳转换',
+//   },
+//   {
+//     key: 'Color',
+//     icon: "",
+//     label: 'CSS 配色',
+//   },
+//   {
+//     key: 'ColorConvert',
+//     icon: "",
+//     label: '颜色格式转换',
+//   },
+//   {
+//     key: 'NumberConvert',
+//     icon: "",
+//     label: '进制转换',
+//   },
+//   {
+//     key: 'QRCodeGenerator',
+//     icon: "",
+//     label: '二维码生成',
+//   },
+//   {
+//     key: 'AESCrypto',
+//     icon: "",
+//     label: 'AES 加解密',
+//   },
+// ];
+
+export {
+  appList
+}

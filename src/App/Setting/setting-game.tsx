@@ -1,0 +1,27 @@
+import { Form } from "antd";
+import { Game2048Setting } from "../Game2048/setting";
+import { TetrisSetting } from "../Tetris/setting";
+import { NesEmulatorSetting } from "../NesEmulator/setting";
+import { MinesweeperSetting } from "../Minesweeper/setting";
+import { GameBoySetting } from "../GameBoy/setting";
+import { FreeCellSetting } from "../FreeCell/setting";
+import { SpiderSolitaireSetting } from "../SpiderSolitaire/setting";
+import { SegaEmulatorSetting } from "../SegaEmulator/setting";
+import { SnakeSetting } from "../Snake/setting";
+
+export const SettingGame = () => {
+
+  return (
+    <Form labelCol={{ span: 5 }} wrapperCol={{ span: 18  }} layout="horizontal"  style={{ maxWidth: 800 }}>
+      <Game2048Setting />
+      <TetrisSetting />
+      <NesEmulatorSetting />
+      <MinesweeperSetting />
+      <GameBoySetting />
+      <FreeCellSetting />
+      <SpiderSolitaireSetting />
+      <SegaEmulatorSetting />
+      <SnakeSetting />
+    </Form>
+  )
+}

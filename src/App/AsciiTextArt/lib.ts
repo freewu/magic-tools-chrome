@@ -1,0 +1,121 @@
+// ASCII 文字: figlet 引擎 (支持 289 款 figlet 字体切换)
+// - 逻辑层: 字体数据懒加载 + parseFont 注册 + 渲染 + 默认字体设置存取
+// - 渲染引擎: figlet (MIT, https://github.com/patorjk/figlet.js)
+// - 字体数据: fonts-data.ts (生成文件, 来自 patorjk/figlet.js fonts 目录)
+
+import figlet from 'figlet';
+import { FONT_NAMES } from './fontNames';
+
+export { FONT_NAMES } from './fontNames';
+
+/** 字体清单缺失时的兜底字体 (必须存在于 FONT_NAMES) */
+export const DEFAULT_FONT = 'Standard';
+
+/** 默认输入文字 (打开页面时的初始内容) */
+export const DEFAULT_TEXT = 'bluefrog';
+
+// ---- 设置存取 (设置 → 其它 → ASCII 文字) ----
+const KEY_FONT = 'ascii-text-art.default-font';
+const KEY_TEXT = 'ascii-text-art.default-text';
+
+const rawGet = (k: string): string | null => {
+  try { return localStorage.getItem(k); } catch { return null; }
+};
+const rawSet = (k: string, v: string): void => {
+  try { localStorage.setItem(k, v); } catch { /* ignore */ }
+};
+
+/** 默认字体 (若本地保存值不在字体清单中则回退 Standard) */
+export function getDefaultFont(): string {
+  const v = rawGet(KEY_FONT);
+  return v && FONT_NAMES.includes(v) ? v : DEFAULT_FONT;
+}
+export function setDefaultFont(v: string): void {
+  rawSet(KEY_FONT, FONT_NAMES.includes(v) ? v : DEFAULT_FONT);
+}
+
+/** 默认文字 (未设置/清空时回退 bluefrog) */
+export function getDefaultText(): string {
+  const v = rawGet(KEY_TEXT);
+  return v !== null && v.trim() !== '' ? v : DEFAULT_TEXT;
+}
+/** 保存默认文字; 传空串表示清除设置 (回退 bluefrog) */
+export function setDefaultText(v: string): void {
+  if (v.trim() === '') {
+    try { localStorage.removeItem(KEY_TEXT); } catch { /* ignore */ }
+    return;
+  }
+  rawSet(KEY_TEXT, v);
+}
+
+// ---- 渲染 ----
+/** 字体数据 (懒加载, 独立 chunk); 解析过的字体记录于 parsedFonts */
+let fontData: Record<string, string> | null = null;
+let dataPromise: Promise<Record<string, string>> | null = null;
+const parsedFonts = new Set<string>();
+
+const loadFontData = async (): Promise<void> => {
+  if (fontData) return;
+  if (!dataPromise) {
+    dataPromise = import('./fonts-data').then((m) => m.FONT_DATA).catch((err) => {
+      dataPromise = null;
+      throw err;
+    });
+  }
+  fontData = await dataPromise;
+};
+
+const ensureParsed = (name: string): void => {
+  if (parsedFonts.has(name) || !fontData) return;
+  figlet.parseFont(name, fontData[name]);
+  parsedFonts.add(name);
+};
+
+/** 字体名首字母分组: A-Z 为对应字母, 其余 (数字/符号开头) 归入 '#' */
+export function fontInitial(name :string): string {
+  const ch = (name.trim()[0] ?? '').toUpperCase();
+  return ch >= 'A' && ch <= 'Z' ? ch : '#';
+}
+
+// ---- ASCII 校验 ----
+/** 允许出现的空白字符 (多行排版用, 不算未收录字符) */
+const ALLOWED_WS = [ '\n', '\r', '\t' ];
+
+/**
+ * 输入里 figlet 未收录的字符清单 (去重, 保持出现顺序)
+ * - ASCII 可打印字符 (0x20-0x7e) 与换行/制表符算合法
+ * - 中文 / 全角标点 / emoji / 其它控制字符均视为未收录 (按码点整体处理)
+ */
+export function nonAsciiChars(text :string): string[] {
+  const out :string[] = [];
+  for (const ch of text) {
+    if (ALLOWED_WS.includes(ch)) continue;
+    const code = ch.codePointAt(0) ?? 0;
+    if (code >= 0x20 && code <= 0x7e) continue;
+    if (!out.includes(ch)) out.push(ch);
+  }
+  return out;
+}
+
+/** 文本是否只含 ASCII 可打印字符 (空白按 ALLOWED_WS 放行) */
+export function isAsciiText(text :string): boolean {
+  return nonAsciiChars(text).length === 0;
+}
+
+/**
+ * 文本 -> figlet 大字
+ * - 字体名不合法时回退默认字体; 空文本返回空串
+ * - 多行文本逐行独立排版; 未收录字符按字体回退 (通常为 ? 或空格)
+ * - 首次调用会动态加载字体数据模块
+ */
+export async function renderText(text: string, font = DEFAULT_FONT): Promise<string> {
+  const name = FONT_NAMES.includes(font) ? font : DEFAULT_FONT;
+  if (!text) return '';
+  try {
+    await loadFontData();
+    ensureParsed(name);
+    return figlet.textSync(text, { font: name }) ?? '';
+  } catch {
+    return '';
+  }
+}

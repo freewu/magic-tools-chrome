@@ -1,0 +1,9 @@
+const AppName = 'RC6 加解密';
+const Icon = 'SecurityScan';
+const Type = 'crypto';
+
+export {
+  AppName,
+  Icon,
+  Type,
+}

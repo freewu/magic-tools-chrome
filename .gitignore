@@ -1,0 +1,23 @@
+# 依赖
+node_modules
+
+# 构建产物 (加载已解压的扩展程序请指向 dist/)
+dist
+release
+
+# 测试 / 缓存
+coverage
+.jest-cache
+*.tsbuildinfo
+
+# 日志
+*.log
+npm-debug.log*
+
+# 系统
+.DS_Store
+.idea
+
+# Chrome 打包中间产物 (chrome.exe --pack-extension)
+dist.crx
+dist.pem

@@ -1,0 +1,81 @@
+import '@testing-library/jest-dom';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
+import AppItem from './app-item';
+import { AppContext } from '../../hook/app-context';
+import { getFavorites } from '../../lib/favorite';
+
+// app-context 依赖 App/index.tsx 的顶层 await + import.meta.glob (jest commonjs 不支持), 故打桩
+jest.mock('../../hook/app-context', () => ({
+  AppContext: require('react').createContext(null),
+}));
+
+const setApp = jest.fn();
+
+const renderItem = (desktop?: boolean, web?: boolean, isNew?: boolean) => render(
+  <MemoryRouter initialEntries={ [ '/' ] }>
+    <AppContext.Provider value={ {
+      app: '',
+      setApp,
+      tabs: [],
+      closeTab: jest.fn(),
+      closeLeft: jest.fn(),
+      closeRight: jest.fn(),
+      closeOthers: jest.fn(),
+    } }>
+      <AppItem uri="DnsQuery" icon="" label="DNS 查询" desktop={ desktop } web={ web } isNew={ isNew } />
+    </AppContext.Provider>
+  </MemoryRouter>
+);
+
+beforeEach(() => { setApp.mockClear(); localStorage.clear(); });
+
+describe('AppStore 应用卡片', () => {
+  test('扩展版不可用的应用展示「扩展版不可用」标识', () => {
+    renderItem(true);
+    expect(screen.getByText('DNS 查询')).toBeInTheDocument();
+    expect(screen.getByText('扩展版不可用')).toBeInTheDocument();
+  });
+
+  test('普通应用不展示标识', () => {
+    renderItem(false);
+    expect(screen.queryByText('扩展版不可用')).not.toBeInTheDocument();
+    expect(screen.queryByText('仅 Web')).not.toBeInTheDocument();
+  });
+
+  test('仅 Web 版应用展示「仅 Web」标识', () => {
+    renderItem(false, true);
+    expect(screen.getByText('DNS 查询')).toBeInTheDocument();
+    expect(screen.getByText('仅 Web')).toBeInTheDocument();
+    expect(screen.queryByText('扩展版不可用')).not.toBeInTheDocument();
+  });
+
+  test('新版本新增的应用展示 NEW 徽标', () => {
+    renderItem(false, false, true);
+    expect(screen.getByText('DNS 查询')).toBeInTheDocument();
+    expect(screen.getByText('NEW')).toBeInTheDocument();
+  });
+
+  test('普通应用不展示 NEW 徽标', () => {
+    renderItem(false);
+    expect(screen.queryByText('NEW')).not.toBeInTheDocument();
+  });
+
+  test('点击卡片切换当前应用', () => {
+    renderItem(false);
+    fireEvent.click(screen.getByText('DNS 查询'));
+    expect(setApp).toHaveBeenCalledWith('DnsQuery');
+  });
+
+  test('点击星标收藏应用 (不触发切换), 再次点击取消收藏', () => {
+    renderItem(false);
+    // 未收藏 -> 星标 aria-label 为「收藏」
+    fireEvent.click(screen.getByRole('button', { name: '收藏' }));
+    expect(getFavorites()).toEqual(['DnsQuery']);
+    expect(setApp).not.toHaveBeenCalled();
+    // 已收藏 -> 星标变为「取消收藏」
+    fireEvent.click(screen.getByRole('button', { name: '取消收藏' }));
+    expect(getFavorites()).toEqual([]);
+    expect(setApp).not.toHaveBeenCalled();
+  });
+});

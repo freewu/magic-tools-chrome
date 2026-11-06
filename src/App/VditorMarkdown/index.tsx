@@ -1,0 +1,599 @@
+import { Alert, Button, Card, Segmented, Select, Space, Spin, Tooltip, Typography, message } from 'antd';
+import {
+  CopyOutlined,
+  DeleteOutlined,
+  DownloadOutlined,
+  FileTextOutlined,
+  FolderOpenOutlined,
+  FullscreenExitOutlined,
+  FullscreenOutlined,
+  OrderedListOutlined,
+} from '@ant-design/icons';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import 'vditor/dist/index.css';
+import { useLocale } from '../../hook/locale-context';
+import { useTheme } from '../../hook/theme-context';
+import { copyTextToClipboard } from '../../lib';
+import { htmlFileNameOf, mdFileNameOf, readTextFile } from '../../lib/file';
+import { saveTextFile } from '../../lib/bridge';
+import { DEFAULT_SAMPLE_ID, MODE_OPTIONS, SAMPLES, findSample } from './data';
+import {
+  EDITOR_HEIGHT,
+  MARKDOWN_OPTIONS,
+  MD_ACCEPT,
+  TOOLBAR,
+  buildToc,
+  contentTheme,
+  docTitle,
+  exportFileName,
+  hljsStyle,
+  markdownStats,
+  vditorCdn,
+  vditorLang,
+  wrapExportHtml,
+  type EditorMode,
+} from './lib';
+import { vm, vmT } from './lang';
+
+const { Text } = Typography;
+
+// Vditor 的体积主要来自运行时资源 (lute 引擎 3.7MB / katex 1.5MB), 这些文件由
+// vite.config.mts 的 vditorAssets 插件按需拷到 dist/vditor 并通过 cdn 选项在运行时拉取,
+// 仓库里不提交这些大文件; 这里的 JS 只做动态 import 懒加载。
+interface VditorInstance {
+  destroy(): void;
+  getValue(): string;
+  setValue(markdown: string): void;
+  insertValue(markdown: string, render?: boolean): void;
+  setTheme(theme: 'dark' | 'classic', contentTheme?: string, codeTheme?: string, contentThemePath?: string): void;
+  focus(): void;
+}
+
+type VditorCtor = new (element: HTMLElement | string, options: Record<string, unknown>) => VditorInstance;
+
+interface VditorStatic extends VditorCtor {
+  md2html(markdown: string, options?: Record<string, unknown>): Promise<string>;
+}
+
+let vditorPromise: Promise<VditorStatic> | null = null;
+/** 动态加载并缓存 Vditor (加载失败允许重试) */
+const loadVditor = (): Promise<VditorStatic> => {
+  if (!vditorPromise) {
+    vditorPromise = import('vditor')
+      .then((mod) => (mod as unknown as { default: VditorStatic }).default)
+      .catch((err: unknown) => {
+        vditorPromise = null;
+        throw err;
+      });
+  }
+  return vditorPromise;
+};
+
+/** 各模式的一句话说明 (中文原文, 经语言包翻译) */
+const MODE_HINTS: Record<EditorMode, string> = {
+  ir: '即时渲染: 光标所在块实时渲染, 其余块保持源码',
+  sv: '分屏预览: 左侧源码, 右侧实时预览',
+  wysiwyg: '所见即所得: 全部内容都是渲染结果',
+};
+
+const STATS_TEXT = '{c} 字符 · {w} 词 · {l} 行 · {h} 标题 · {cb} 代码块 · {lk} 链接 · {im} 图片';
+
+const HINT_TEXT =
+  '支持表格 / 任务列表 / 代码高亮 / KaTeX 公式 / 脚注 / 提示块; 粘贴或拖入的图片以 base64 内联 (2MB 以内); 可打开本地 .md 文件继续编辑';
+
+/** 内联图片上限 (base64 会让文档迅速变大) */
+const MAX_INLINE_IMAGE = 2 * 1024 * 1024;
+
+/** 原生全屏 API 的类型补充 (内嵌 WebView 只认 webkit 前缀) */
+type FullscreenElement = HTMLDivElement & { webkitRequestFullscreen?: () => Promise<void> | void };
+type FullscreenDocument = Document & {
+  webkitFullscreenElement?: Element | null;
+  webkitExitFullscreen?: () => Promise<void> | void;
+};
+
+/**
+ * 全屏态样式: 未进入原生全屏时用 position: fixed 铺满窗口兜底 (内嵌 webview 可能拒绡原生全屏)。
+ * Vditor 会把 options.height 写成元素的行内 height, 全屏时需要用 !important 覆盖才能撑满。
+ */
+const STAGE_CSS = [
+  '.vmd-stage { display: flex; flex-direction: column; }',
+  '.vmd-stage > .ant-card { width: 100%; }',
+  '.vmd-stage.vmd-full { position: fixed; inset: 0; z-index: 1000; overflow: hidden; }',
+  '.vmd-stage.vmd-full > .ant-card { flex: 1 1 auto; min-height: 0; border-radius: 0; display: flex; flex-direction: column; }',
+  '.vmd-stage.vmd-full > .ant-card > .ant-card-head { flex: 0 0 auto; }',
+  '.vmd-stage.vmd-full > .ant-card > .ant-card-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }',
+  // 错误提示 / 统计条 / 说明行保持自然高度, 只让编辑器吃掉剩余空间
+  '.vmd-stage.vmd-full > .ant-card > .ant-card-body > *:not(.vmd-editor) { flex: 0 0 auto; }',
+  '.vmd-stage.vmd-full .vmd-editor { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }',
+  '.vmd-stage.vmd-full .vmd-host { flex: 1 1 auto; min-height: 0; }',
+  '.vmd-stage.vmd-full .vmd-host > .vditor { height: 100% !important; }',
+].join('\n');
+
+/** 读取为 data URL (粘贴 / 上传的图片内联到 Markdown 里, 不依赖后端) */
+const readAsDataUrl = (file: File): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.onerror = () => reject(new Error('read error'));
+    reader.readAsDataURL(file);
+  });
+
+/** 拉取同源的 Vditor 样式文件 (导出 HTML 时内联, 保证离线可用) */
+const fetchText = async (url: string): Promise<string> => {
+  const fetcher = (globalThis as { fetch?: typeof fetch }).fetch;
+  if (typeof fetcher !== 'function') return '';
+  try {
+    const res = await fetcher(url);
+    return res.ok ? await res.text() : '';
+  } catch {
+    return '';
+  }
+};
+
+const VditorMarkdown: React.FC = () => {
+  const { locale } = useLocale();
+  const { isDark } = useTheme();
+  const t = (zh: string) => vm(locale, zh);
+  const tt = (zh: string, vars?: Record<string, string | number>) => vmT(locale, zh, vars);
+  const editorLang = vditorLang(locale);
+  // 资源前缀: 以当前文档地址为基准, hash 路由下恒定指向 index.html 所在目录,
+  // 因此 Tauri 自定义协议 / Pages 子路径 / 开发服务器都能命中
+  const cdn = useMemo(() => vditorCdn(document.baseURI), []);
+  const themePath = `${cdn}/dist/css/content-theme`;
+
+  const [markdown, setMarkdown] = useState(() => findSample(DEFAULT_SAMPLE_ID)?.md ?? '');
+  const [sampleId, setSampleId] = useState(DEFAULT_SAMPLE_ID);
+  const [mode, setMode] = useState<EditorMode>('ir');
+  const [ready, setReady] = useState(false);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState<'copyHtml' | 'saveMd' | 'saveHtml' | ''>('');
+  const [full, setFull] = useState(false);
+  // 打开过的本地文件名 (空表示还没打开过文件): 保存时沿用它的名字
+  const [fileName, setFileName] = useState('');
+
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const vditorRef = useRef<VditorInstance | null>(null);
+  // 重建编辑器 / 导出时读取最新值, 避免把 markdown 放进 effect 依赖导致频繁重建
+  const markdownRef = useRef(markdown);
+  const darkRef = useRef(isDark);
+  markdownRef.current = markdown;
+  darkRef.current = isDark;
+
+  const stats = useMemo(() => markdownStats(markdown), [markdown]);
+
+  // Vditor 不支持运行时切换模式, 模式 / 界面语言变化时整体重建
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return undefined;
+    let disposed = false;
+    let instance: VditorInstance | null = null;
+    setReady(false);
+    setError('');
+
+    const applyTheme = () => {
+      const dark = darkRef.current;
+      instance?.setTheme(dark ? 'dark' : 'classic', contentTheme(dark), hljsStyle(dark), themePath);
+    };
+
+    /** 粘贴 / 上传图片: 转成 data URL 内联; 返回字符串表示失败提示 (Vditor 会以 tip 展示) */
+    const handleUpload = async (files: File[]): Promise<string | null> => {
+      try {
+        const parts: string[] = [];
+        for (const file of files) {
+          if (!file.type.startsWith('image/')) return t('仅支持插入图片文件');
+          if (file.size > MAX_INLINE_IMAGE) return t('图片过大 (超过 2MB), 请先压缩再插入');
+          parts.push(`![${file.name}](${await readAsDataUrl(file)})`);
+        }
+        if (parts.length === 0) return null;
+        if (!instance) return t('编辑器尚未就绪');
+        instance.insertValue(`\n${parts.join('\n')}\n`);
+        return null;
+      } catch (err) {
+        return err instanceof Error ? err.message : String(err);
+      }
+    };
+
+    loadVditor()
+      .then((Vditor) => {
+        if (disposed) return;
+        instance = new Vditor(host, {
+          cdn,
+          lang: editorLang,
+          mode,
+          icon: 'ant',
+          height: EDITOR_HEIGHT,
+          value: markdownRef.current,
+          placeholder: t('在此输入 Markdown, 光标所在块会即时渲染'),
+          cache: { enable: false },
+          tab: '  ',
+          toolbar: TOOLBAR,
+          upload: { accept: 'image/*', handler: handleUpload },
+          preview: {
+            hljs: { style: hljsStyle(darkRef.current), lineNumber: false },
+            math: { engine: 'KaTeX', inlineDigit: true },
+            markdown: MARKDOWN_OPTIONS,
+            theme: { current: contentTheme(darkRef.current), path: themePath },
+          },
+          input: (value: string) => {
+            setMarkdown(value);
+            setSampleId('');
+          },
+          after: () => {
+            if (disposed) return;
+            applyTheme();
+            setReady(true);
+          },
+        });
+        vditorRef.current = instance;
+      })
+      .catch((err: unknown) => {
+        if (!disposed) setError(err instanceof Error ? err.message : String(err));
+      });
+
+    return () => {
+      disposed = true;
+      vditorRef.current = null;
+      try {
+        instance?.destroy();
+      } catch {
+        // 忽略销毁异常 (组件卸载后 DOM 已不可用)
+      }
+    };
+  }, [cdn, editorLang, mode, themePath]);
+
+  // 主题切换走 setTheme 热更新, 不重建编辑器 (避免丢失撤销历史与光标位置)
+  useEffect(() => {
+    if (!ready) return;
+    const dark = isDark;
+    vditorRef.current?.setTheme(dark ? 'dark' : 'classic', contentTheme(dark), hljsStyle(dark), themePath);
+  }, [isDark, ready, themePath]);
+
+  // ---- 全屏: 先请求原生全屏, 失败 (内嵌 webview / 非用户手势) 时用窗口内全屏兜底 ----
+  const enterFull = useCallback(() => {
+    setFull(true);
+    const el = stageRef.current as FullscreenElement | null;
+    const request = el?.requestFullscreen?.bind(el) ?? el?.webkitRequestFullscreen?.bind(el);
+    if (!request) return;
+    try {
+      void Promise.resolve(request()).catch(() => undefined);
+    } catch {
+      /* 忽略: 已有 CSS 全屏兜底 */
+    }
+  }, []);
+
+  const exitFull = useCallback(() => {
+    setFull(false);
+    const doc = document as FullscreenDocument;
+    if (!(doc.fullscreenElement ?? doc.webkitFullscreenElement)) return;
+    try {
+      const exit = doc.exitFullscreen?.bind(doc) ?? doc.webkitExitFullscreen?.bind(doc);
+      void Promise.resolve(exit?.()).catch(() => undefined);
+    } catch {
+      /* 忽略 */
+    }
+  }, []);
+
+  // 浏览器(含 Esc)退出原生全屏时同步状态, 避免按钮卡在「退出全屏」
+  useEffect(() => {
+    const doc = document as FullscreenDocument;
+    const onChange = () => { if (!doc.fullscreenElement && !doc.webkitFullscreenElement) setFull(false); };
+    document.addEventListener('fullscreenchange', onChange);
+    document.addEventListener('webkitfullscreenchange', onChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', onChange);
+      document.removeEventListener('webkitfullscreenchange', onChange);
+    };
+  }, []);
+
+  // Esc 退出窗口内全屏 (原生全屏由浏览器自己处理)
+  useEffect(() => {
+    if (!full) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      const doc = document as FullscreenDocument;
+      if (doc.fullscreenElement ?? doc.webkitFullscreenElement) return;
+      exitFull();
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [ full, exitFull ]);
+
+  // 卸载时退出原生全屏, 避免切到别的工具后还停在全屏层
+  useEffect(() => () => {
+    const doc = document as FullscreenDocument;
+    if (!(doc.fullscreenElement ?? doc.webkitFullscreenElement)) return;
+    try {
+      const exit = doc.exitFullscreen?.bind(doc) ?? doc.webkitExitFullscreen?.bind(doc);
+      void Promise.resolve(exit?.()).catch(() => undefined);
+    } catch {
+      /* 忽略 */
+    }
+  }, []);
+
+  // ---- 打开本地 .md: 读入编辑器, 保存时沿用原文件名 (编辑器是命令式的, 需要 setValue 同步) ----
+  const loadFile = async (file?: File | null) => {
+    if (!file) return;
+    try {
+      const text = await readTextFile(file);
+      setFileName(file.name);
+      setSampleId('');
+      setMarkdown(text);
+      vditorRef.current?.setValue(text);
+      message.success(tt('已打开 {file}', { file: file.name }));
+    } catch {
+      message.error(t('打开文件失败'));
+    }
+  };
+
+  const onPickFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    void loadFile(e.target.files?.[0]);
+    // 清空 value: 同一个文件再选一次也能触发 change
+    e.target.value = '';
+  };
+
+  /** 保存时用的文件名: 打开过文件就用它的名字 (my-note.md / my-note.html), 否则按文档标题推导 */
+  const saveName = (ext: 'md' | 'html'): string =>
+    fileName === ''
+      ? exportFileName(docTitle(markdownRef.current), ext)
+      : (ext === 'md' ? mdFileNameOf(fileName, 'markdown') : htmlFileNameOf(fileName, 'markdown'));
+
+  const applySample = (id: string) => {
+    const sample = findSample(id);
+    if (!sample) return;
+    setSampleId(id);
+    setFileName('');
+    setMarkdown(sample.md);
+    vditorRef.current?.setValue(sample.md);
+  };
+
+  const insertToc = () => {
+    const toc = buildToc(markdownRef.current);
+    if (toc === '') {
+      message.warning(t('未找到可插入的标题 (需要 h2 及以下标题)'));
+      return;
+    }
+    vditorRef.current?.insertValue(toc);
+  };
+
+  const clearAll = () => {
+    setMarkdown('');
+    setSampleId('');
+    setFileName('');
+    vditorRef.current?.setValue('');
+  };
+
+  const copy = async (text: string, ok: string) => {
+    try {
+      await copyTextToClipboard(text);
+      message.success(ok);
+    } catch {
+      message.error(t('复制失败, 请手动选择复制'));
+    }
+  };
+
+  /** 用 Vditor 自带的 md2html 渲染, 并内联主题 / 代码高亮样式 */
+  const buildHtml = async (): Promise<string> => {
+    const Vditor = await loadVditor();
+    const dark = darkRef.current;
+    const body = await Vditor.md2html(markdownRef.current, {
+      cdn,
+      lang: editorLang,
+      hljs: { style: hljsStyle(dark), lineNumber: false },
+      math: { engine: 'KaTeX', inlineDigit: true },
+      markdown: MARKDOWN_OPTIONS,
+      theme: { current: contentTheme(dark), path: themePath },
+    });
+    const [themeCss, codeCss] = await Promise.all([
+      fetchText(`${cdn}/dist/css/content-theme/${contentTheme(dark)}.css`),
+      fetchText(`${cdn}/dist/js/highlight.js/styles/${hljsStyle(dark)}.min.css`),
+    ]);
+    return wrapExportHtml(body, {
+      title: docTitle(markdownRef.current),
+      isDark: dark,
+      lang: locale,
+      themeCss,
+      codeCss,
+    });
+  };
+
+  const copyHtml = async () => {
+    setBusy('copyHtml');
+    try {
+      await copy(await buildHtml(), t('已复制 HTML'));
+    } catch {
+      message.error(t('HTML 渲染失败'));
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const saveMarkdown = async () => {
+    setBusy('saveMd');
+    try {
+      const ok = await saveTextFile(
+        saveName('md'),
+        markdownRef.current,
+        t('导出 .md'),
+        { filterName: 'Markdown', extensions: ['md'] },
+      );
+      if (ok) message.success(t('保存成功'));
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const saveHtml = async () => {
+    setBusy('saveHtml');
+    try {
+      const html = await buildHtml();
+      const ok = await saveTextFile(
+        saveName('html'),
+        html,
+        t('导出 .html'),
+        { filterName: 'HTML', extensions: ['html'] },
+      );
+      if (ok) message.success(t('保存成功'));
+    } catch {
+      message.error(t('HTML 渲染失败'));
+    } finally {
+      setBusy('');
+    }
+  };
+
+  return (
+    <div
+      ref={stageRef}
+      className={full ? 'vmd-stage vmd-full' : 'vmd-stage'}
+      style={{
+        // 窗口内全屏 (兜底) 时铺满视口, 底色跟随主题, 深色模式下不闪白
+        background: full ? (isDark ? '#141414' : '#fff') : undefined,
+      }}
+    >
+    <style>{STAGE_CSS}</style>
+    <Card
+      size="small"
+      title={t('即时渲染 Markdown')}
+      extra={
+        <>
+        <input ref={fileRef} type="file" accept={MD_ACCEPT} style={{ display: 'none' }} onChange={onPickFile} />
+        <Space size={8} wrap>
+          <Segmented
+            size="small"
+            value={mode}
+            onChange={(value) => setMode(value as EditorMode)}
+            options={MODE_OPTIONS.map((item) => ({ value: item.value, label: t(item.label) }))}
+          />
+          <Select
+            size="small"
+            showSearch
+            style={{ minWidth: 150 }}
+            value={sampleId === '' ? undefined : sampleId}
+            placeholder={t('示例')}
+            optionFilterProp="label"
+            onChange={applySample}
+            options={SAMPLES.map((sample) => ({ value: sample.id, label: t(sample.label) }))}
+          />
+          <Tooltip title={t('打开 .md 文件编辑 (选择本地文件读入编辑器)')}>
+            <Button size="small" icon={<FolderOpenOutlined />} disabled={!ready} onClick={() => fileRef.current?.click()}>
+              {t('打开文件')}
+            </Button>
+          </Tooltip>
+          <Button size="small" icon={<CopyOutlined />} disabled={markdown === ''} onClick={() => copy(markdown, t('已复制 Markdown'))}>
+            {t('复制 Markdown')}
+          </Button>
+          <Button
+            size="small"
+            icon={<FileTextOutlined />}
+            loading={busy === 'copyHtml'}
+            disabled={markdown === ''}
+            onClick={copyHtml}
+          >
+            {t('复制 HTML')}
+          </Button>
+          <Button
+            size="small"
+            icon={<OrderedListOutlined />}
+            disabled={markdown === ''}
+            onClick={insertToc}
+          >
+            {t('插入目录')}
+          </Button>
+          <Button
+            size="small"
+            icon={<DownloadOutlined />}
+            loading={busy === 'saveMd'}
+            disabled={markdown === ''}
+            onClick={saveMarkdown}
+          >
+            {t('导出 .md')}
+          </Button>
+          <Button
+            size="small"
+            icon={<DownloadOutlined />}
+            loading={busy === 'saveHtml'}
+            disabled={markdown === ''}
+            onClick={saveHtml}
+          >
+            {t('导出 .html')}
+          </Button>
+          <Tooltip title={full ? t('按 Esc 退出全屏') : t('全屏编辑, 屏幕更大更好写')}>
+            <Button
+              size="small"
+              icon={full ? <FullscreenExitOutlined /> : <FullscreenOutlined />}
+              onClick={full ? exitFull : enterFull}
+            >
+              {t(full ? '退出全屏' : '全屏')}
+            </Button>
+          </Tooltip>
+          <Button size="small" danger icon={<DeleteOutlined />} disabled={markdown === ''} onClick={clearAll}>
+            {t('清空')}
+          </Button>
+        </Space>
+        </>
+      }
+    >
+      {error !== '' && (
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginBottom: 10 }}
+          message={t('编辑器加载失败, 请刷新页面重试')}
+          description={error}
+        />
+      )}
+      <div className="vmd-editor" style={{ position: 'relative' }}>
+        <div className="vmd-host" ref={hostRef} />
+        {!ready && error === '' && (
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 8,
+            }}
+          >
+            <Spin size="small" />
+            <Text type="secondary">{t('编辑器加载中…')}</Text>
+          </div>
+        )}
+      </div>
+      <div
+        style={{
+          marginTop: 8,
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'baseline',
+          gap: 12,
+          flexWrap: 'wrap',
+        }}
+      >
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {tt(STATS_TEXT, {
+            c: stats.chars,
+            w: stats.words,
+            l: stats.lines,
+            h: stats.headings,
+            cb: stats.codeBlocks,
+            lk: stats.links,
+            im: stats.images,
+          })}
+        </Text>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {t(MODE_HINTS[mode])}
+        </Text>
+      </div>
+      <div style={{ marginTop: 4 }}>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {t(HINT_TEXT)}
+        </Text>
+      </div>
+    </Card>
+    </div>
+  );
+};
+
+export default VditorMarkdown;

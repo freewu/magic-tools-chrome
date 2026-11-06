@@ -1,0 +1,152 @@
+import { ColorPicker, Divider, Form, Segmented, Slider, Switch, Typography } from 'antd';
+import { useState } from 'react';
+import { useLocale } from '../../hook/locale-context';
+import { row as _r, rowT } from '../Setting/rows-lang';
+import { uT } from './lang';
+import {
+  COUNTDOWN_OPTIONS, FONT_SIZE_DEFAULT, FONT_SIZE_MAX, FONT_SIZE_MIN,
+  GUIDE_COLOR_DEFAULT, GUIDE_RATIO_DEFAULT, GUIDE_RATIO_MAX, GUIDE_RATIO_MIN, GUIDE_RATIO_STEP,
+  LINE_HEIGHT_DEFAULT, LINE_HEIGHT_MAX, LINE_HEIGHT_MIN,
+  SPEED_DEFAULT, SPEED_MAX, SPEED_MIN, SPEED_STEP,
+} from './data';
+import { clampCountdown, clampGuideRatio, normalizeGuideColor } from './lib';
+import { getDefaultOptions, patchDefaultOptions, type PrompterOptions } from './lib';
+
+/** 提词器默认设置 (挂载到 设置 → 其它) */
+export const TeleprompterSetting: React.FC = () => {
+  const { locale } = useLocale();
+  const st = (zh: string) => _r(locale, zh);
+  const [ opts, setOpts ] = useState<PrompterOptions>(() => getDefaultOptions());
+
+  /** 逐项修改: 立即落盘, 工具页下次打开时生效 */
+  const change = (next: Partial<PrompterOptions>) => setOpts(patchDefaultOptions(next));
+
+  return (
+    <>
+      <Divider orientation="left" plain>{ st('提词器') }</Divider>
+      <Form.Item
+        label={ st('默认滚动速度') }
+        extra={ rowT(locale, '打开「提词器」时默认的滚动速度 (px/s), 范围 ${min} - ${max}, 默认 ${d}', { min: SPEED_MIN, max: SPEED_MAX, d: SPEED_DEFAULT }) }
+      >
+        <Slider
+          min={ SPEED_MIN }
+          max={ SPEED_MAX }
+          step={ SPEED_STEP }
+          value={ opts.speed }
+          onChange={ (v: number) => change({ speed: v }) }
+          style={ { width: 260 } }
+        />
+        <Typography.Text type="secondary" style={ { marginLeft: 8, fontSize: 12 } }>{ `${opts.speed} px/s` }</Typography.Text>
+      </Form.Item>
+      <Form.Item
+        label={ st('默认字号') }
+        extra={ rowT(locale, '打开「提词器」时默认的字号 (px), 范围 ${min} - ${max}, 默认 ${d}', { min: FONT_SIZE_MIN, max: FONT_SIZE_MAX, d: FONT_SIZE_DEFAULT }) }
+      >
+        <Slider
+          min={ FONT_SIZE_MIN }
+          max={ FONT_SIZE_MAX }
+          value={ opts.fontSize }
+          onChange={ (v: number) => change({ fontSize: v }) }
+          style={ { width: 260 } }
+        />
+        <Typography.Text type="secondary" style={ { marginLeft: 8, fontSize: 12 } }>{ `${opts.fontSize} px` }</Typography.Text>
+      </Form.Item>
+      <Form.Item
+        label={ st('默认行距') }
+        extra={ rowT(locale, '打开「提词器」时默认的行距倍率, 范围 ${min} - ${max}, 默认 ${d}', { min: LINE_HEIGHT_MIN, max: LINE_HEIGHT_MAX, d: LINE_HEIGHT_DEFAULT }) }
+      >
+        <Slider
+          min={ LINE_HEIGHT_MIN }
+          max={ LINE_HEIGHT_MAX }
+          step={ 0.1 }
+          value={ opts.lineHeight }
+          onChange={ (v: number) => change({ lineHeight: v }) }
+          style={ { width: 260 } }
+        />
+        <Typography.Text type="secondary" style={ { marginLeft: 8, fontSize: 12 } }>{ `${opts.lineHeight.toFixed(1)} x` }</Typography.Text>
+      </Form.Item>
+      <Form.Item
+        label={ st('默认淡入淡出') }
+        extra={ st('打开「提词器」时是否默认开启边缘淡入淡出 (文字在上下边缘渐隐, 更接近真实提词器)') }
+      >
+        <Switch
+          checked={ opts.fade }
+          checkedChildren={ st('开启') }
+          unCheckedChildren={ st('关闭') }
+          onChange={ (v: boolean) => change({ fade: v }) }
+        />
+      </Form.Item>
+      <Form.Item
+        label={ st('默认逐行高亮') }
+        extra={ st('打开「提词器」时是否默认开启逐行高亮 (高亮当前阅读行并按进度从左到右逐字点亮, 离它越远的行越透明、颜色越淡)') }
+      >
+        <Switch
+          checked={ opts.focus }
+          checkedChildren={ st('开启') }
+          unCheckedChildren={ st('关闭') }
+          onChange={ (v: boolean) => change({ focus: v }) }
+        />
+      </Form.Item>
+      <Form.Item
+        label={ st('默认基准线') }
+        extra={ rowT(locale, '打开「提词器」时是否默认显示阅读基准线 (在阅读线位置画一条横线, 方便对准视线)') }
+      >
+        <Switch
+          checked={ opts.guide }
+          checkedChildren={ st('开启') }
+          unCheckedChildren={ st('关闭') }
+          onChange={ (v: boolean) => change({ guide: v }) }
+        />
+      </Form.Item>
+      <Form.Item
+        label={ st('默认基准线位置') }
+        extra={ rowT(locale, '阅读基准线的垂直位置 (占舞台高度的比例), 范围 ${min} - ${max}, 默认 ${d}; 工具页里也可直接在舞台上上下拖这条线调整', {
+          min: `${Math.round(GUIDE_RATIO_MIN * 100)}%`,
+          max: `${Math.round(GUIDE_RATIO_MAX * 100)}%`,
+          d: `${Math.round(GUIDE_RATIO_DEFAULT * 100)}%`,
+        }) }
+      >
+        <Slider
+          min={ GUIDE_RATIO_MIN }
+          max={ GUIDE_RATIO_MAX }
+          step={ GUIDE_RATIO_STEP }
+          value={ opts.guideRatio }
+          disabled={ !opts.guide }
+          onChange={ (v: number) => change({ guideRatio: clampGuideRatio(v) }) }
+          style={ { width: 260 } }
+          tooltip={ { formatter: (v?: number) => `${Math.round((v ?? 0) * 100)}%` } }
+        />
+        <Typography.Text type="secondary" style={ { marginLeft: 8, fontSize: 12 } }>{ `${Math.round(opts.guideRatio * 100)}%` }</Typography.Text>
+      </Form.Item>
+      <Form.Item
+        label={ st('默认基准线颜色') }
+        extra={ rowT(locale, '阅读基准线的颜色, 默认 ${d} (只在「默认基准线」开启时显示)', { d: GUIDE_COLOR_DEFAULT }) }
+      >
+        <ColorPicker
+          value={ opts.guideColor }
+          disabled={ !opts.guide }
+          onChange={ (v) => change({ guideColor: normalizeGuideColor(v.toHexString()) }) }
+          showText
+        />
+      </Form.Item>
+      <Form.Item
+        label={ st('默认倒计时') }
+        extra={ st('打开「提词器」后点「开始」时, 从开头播放前先倒数的秒数 (0 = 关闭)') }
+      >
+        <Segmented
+          value={ opts.countdown }
+          onChange={ (v) => change({ countdown: clampCountdown(v) }) }
+          options={ COUNTDOWN_OPTIONS.map((n) => ({
+            value: n,
+            label: n === 0 ? st('关闭') : uT(locale, '{n} 秒', { n }),
+          })) }
+        />
+      </Form.Item>
+      <Typography.Paragraph type="secondary" style={ { fontSize: 12, marginBottom: 0 } }>
+        { st('工具页的「保存为默认设置」按钮可把当前页面的参数一键存为这里的默认值; 默认值在打开工具页时生效, 不影响已打开的页面') }
+      </Typography.Paragraph>
+    </>
+  );
+};
+
+export default TeleprompterSetting;

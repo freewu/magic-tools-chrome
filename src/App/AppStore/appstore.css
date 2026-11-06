@@ -1,0 +1,170 @@
+.appstore {
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start; /* 处理数据太少 行间问题 */
+}
+
+/* 顶部工具栏: 左=分类筛选下拉, 右=筛选后应用总数 */
+.appstore-toolbar {
+  flex: 0 0 auto;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px 12px 2px;
+}
+
+.appstore-toolbar-count {
+  font-size: 13px;
+}
+
+/* 每个分类占满整行 (分割线 + 卡片); 内部 flex 排列使卡片一行展示多个 */
+.appstore-group {
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+}
+
+/* 分类分割线: 名字与数量使用柔和灰; 占满整行 (避免与卡片同行) */
+.appstore-group-divider {
+  margin: 18px 0 8px 0;
+  flex: 0 0 100%;
+}
+
+.appstore-group-divider .ant-divider-inner-text {
+  color: var(--app-text, rgba(0, 0, 0, 0.45));
+  opacity: 0.65;
+  font-weight: 400;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.appstore-group-name {
+  letter-spacing: 1px;
+}
+
+.appstore-group-count {
+  margin-left: 8px;
+  font-size: 12px;
+  opacity: 0.55;
+}
+
+/* 空结果: 关键词/分类筛选后无匹配应用 */
+.appstore-empty {
+  width: 100%;
+  padding: 40px 0;
+  display: flex;
+  justify-content: center;
+  opacity: 0.75;
+}
+
+.app {
+  position: relative;
+  /* 图标 + 名称水平居中; 名称过长时在卡片内换行 (卡片高度固定, 保持栅格对齐) */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 168px;
+  height: 64px;
+  border: 1px solid #424c50;
+  cursor: pointer;
+  margin: 5px;
+  color: inherit;
+  text-align: center;
+  padding: 0 6px;
+  opacity: 0.9;
+  border-radius: 4px;
+}
+
+/* 应用图标: 与名称同行, 默认略淡; 悬停时高亮 */
+.app-icon {
+  opacity: 0.8;
+  transition: opacity 0.15s, color 0.15s;
+}
+
+/* 应用名称: 允许在图标右侧换行 (不溢出卡片) */
+.app-name {
+  line-height: 1.25;
+}
+
+.app:hover .app-icon {
+  opacity: 1;
+  color: #1677ff;
+}
+
+/* 仅桌面版 / 仅 Web 标识: 卡片右下角小图标 + 文案 (悬停显示完整提示)
+   (左上角留给 NEW 徽标, 右上角留给收藏星标) */
+.app-desktop-badge,
+.app-web-badge {
+  position: absolute;
+  right: 4px;
+  bottom: 2px;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-size: 11px;
+  line-height: 1;
+  opacity: 0.55;
+  color: inherit;
+}
+
+.app-desktop-badge-text,
+.app-web-badge-text {
+  letter-spacing: 0;
+}
+
+/* 收藏星标: 卡片右上角, 默认淡显, 悬停 / 已收藏时高亮 */
+.app-star {
+  position: absolute;
+  top: 1px;
+  right: 2px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  line-height: 1;
+  color: inherit;
+  opacity: 0.4;
+  transition: opacity 0.15s, color 0.15s, transform 0.15s;
+}
+
+.app-star:hover {
+  opacity: 1;
+  color: #faad14;
+  transform: scale(1.15);
+}
+
+.app-star-on {
+  opacity: 1;
+  color: #faad14;
+}
+
+.app-star-on:hover {
+  color: #d48806;
+}
+
+/* NEW 徽标: 骑在卡片左上角, 压住上边框与左边框 (define.tsx 的 IsNew)
+   top 取负的半个行高, 使徽标垂直居中于上边框; left 取负的卡片外边距 (5px),
+   使徽标左端正好压在左边框线上且不会被滚动容器裁掉 (卡片本身无 overflow: hidden) */
+.app-new-badge {
+  position: absolute;
+  top: -7px;
+  left: -5px;
+  padding: 0 5px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 14px;
+  letter-spacing: 0.5px;
+  color: #fff;
+  background: linear-gradient(135deg, #ff7875, #f5222d);
+  border-radius: 999px;
+}

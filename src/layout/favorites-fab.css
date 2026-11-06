@@ -1,0 +1,57 @@
+/* 收藏悬浮入口 (FAB): 固定悬浮, 可拖动到任意位置 */
+.favorites-fab {
+  position: fixed;
+  z-index: 999;               /* 高于内容区与侧边栏拖拽条 (20), 低于 antd 弹层 (1000+) */
+  width: 46px;
+  height: 46px;
+  padding: 0;
+  border: 1px solid var(--app-border, rgba(128, 128, 128, 0.35));
+  border-radius: 50%;
+  background: var(--app-raised, #ffffff);
+  color: #faad14;
+  font-size: 20px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  touch-action: none;         /* 拖动时禁止页面滚动 (触摸端) */
+  -webkit-user-select: none;
+  user-select: none;
+  transition: box-shadow 0.15s, transform 0.15s;
+}
+
+.favorites-fab:hover {
+  transform: scale(1.06);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.24);
+}
+
+.favorites-fab:active,
+.favorites-fab-dragging {
+  cursor: grabbing;
+}
+
+.favorites-fab-dragging {
+  transition: none;
+  transform: scale(1.04);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+}
+
+/* 收藏数量角标: 放到悬浮入口(整个圆形按钮)的左上角, 与 antd 默认的右上角镜像
+   - .ant-badge 改为 static: 让角标相对按钮定位 (而不是相对图标盒子)
+   - antd 自带 transform: translate(50%, -50%) (角标中心对其锚点),
+     所以 inset-inline-end / top 各留 6px 即可让角标向右向下靠近圆形边缘 */
+.favorites-fab .ant-badge {
+  position: static;
+}
+
+.favorites-fab .ant-badge-count {
+  inset-inline-end: calc(100% - 6px);
+  top: 6px;
+  /* 金色角标: 与金色星标呼应 (渐变避免大面积死板), 数字用白色加粗 */
+  background: linear-gradient(135deg, #ffd666 0%, #faad14 55%, #d48806 100%);
+  color: #ffffff;
+  font-weight: 600;
+  box-shadow: 0 0 0 1px var(--app-raised, #ffffff), 0 1px 2px rgba(0, 0, 0, 0.2);
+}

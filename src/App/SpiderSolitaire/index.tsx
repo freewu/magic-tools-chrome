@@ -1,0 +1,1014 @@
+// 蜘蛛纸牌 (Spider Solitaire): 10 列牌桌 + 5 轮发牌, 收满 8 组同花 K→A 即通关
+// 规则参考 https://cardgames.io/zh/spidersolitaire/
+// 说明: 规则计算全部在 lib.ts (纯函数), 本文件只做渲染与键盘 / 计时 / 全屏等副作用
+import { Alert, Button, Card, Divider, InputNumber, Select, Space, Tag, Tooltip, Typography, message, theme } from 'antd';
+import {
+  BulbOutlined, DownloadOutlined, FullscreenExitOutlined, FullscreenOutlined, PlaySquareOutlined,
+  PlusCircleOutlined, ReloadOutlined, UndoOutlined,
+} from '@ant-design/icons';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { AppContext } from '../../hook/app-context';
+import { useLocale } from '../../hook/locale-context';
+import {
+  CARD_SIZE_CSS, CARD_SIZE_CSS_FULL, DEAL_ANIM_TOTAL_MS, DEAL_ROW_ANIM_TOTAL_MS, DEAL_ROW_STAGGER_STEP,
+  DIFFICULTIES, HISTORY_LIMIT,
+  IS_RED, RANK_LABEL, SEED_MAX, SEED_MIN, SERIES_COUNT, SP_CSS, SUIT_SYMBOL, type Difficulty,
+} from './data';
+import {
+  applyMove, canMove, cardId, cloneState, collectCompleted, collectedCount, dealFromSeed, dealStock,
+  dealsLeft, findHint, formatTime, getDefaultOptions, getLastSeed, getRecords, isRedCard, isStuck,
+  isTypingTarget, isWin, keyToAction, normalizeSeed, patchDefaultOptions, randomSeed, recordPlay,
+  recordWin, runFrom, setLastSeed, type Card as CardData, type GameState, type Move, type SpiderRecords,
+} from './lib';
+import { u, uT } from './lang';
+import SpiderSolitaireIntro from './intro';
+
+const { Text } = Typography;
+
+type FullscreenElement = HTMLDivElement & { webkitRequestFullscreen?: () => Promise<void> | void };
+type FullscreenDocument = Document & {
+  webkitFullscreenElement?: Element | null;
+  webkitExitFullscreen?: () => Promise<void> | void;
+};
+
+/** 当前选中的一段连牌 */
+type Selection = { col: number; start: number; count: number };
+
+/** 正在被拖动的牌组 */
+type DragState = {
+  from: number;
+  count: number;
+  /** 这段连牌在该列中的起始下标 */
+  start: number;
+  cards: CardData[];
+  x: number;
+  y: number;
+  offX: number;
+  offY: number;
+  /** 指针当前悬停的目标列 */
+  over: number | null;
+};
+
+/** 移动超过该距离才算拖拽, 否则视为点击 */
+const DRAG_THRESHOLD = 5;
+
+/** 落点容差: 松手位置常落在两列之间的缝里, 按列宽 / 列高的比例就近吸附 */
+const DROP_SNAP_X = 0.7;
+const DROP_SNAP_Y = 0.35;
+
+/**
+ * 取指针坐标: 有的环境 (jsdom / 部分合成事件) 拿不到 clientX, 此时得到 NaN。
+ * 坐标不可用时按「已经移动」处理 (宁可拖起来也别吞掉用户的滑动), 只把幽灵牌放在原点。
+ */
+const pointerPos = (e: { clientX?: number; clientY?: number }): { x: number; y: number } => ({
+  x: e.clientX as number,
+  y: e.clientY as number,
+});
+
+/** 幽灵牌定位 (坐标不可用时返回 undefined, 交给 CSS 定位) */
+const finiteOrUndefined = (v: number): number | undefined => (Number.isFinite(v) ? v : undefined);
+
+/**
+ * 一副刚摆好的牌局里, 每张牌在发牌动画中的顺序 (逐轮发: 第 0 轮每列一张, 再第 1 轮 ...)
+ */
+const dealOrderOf = (next: GameState): Record<string, number> => {
+  const map: Record<string, number> = {};
+  const cols = next.tableau.length;
+  const rows = next.tableau.reduce((max, pile) => Math.max(max, pile.length), 0);
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      const card = next.tableau[col][row];
+      if (card) map[cardId(card)] = row * cols + col;
+    }
+  }
+  return map;
+};
+
+/** 发一轮牌之后, 每列新增的那张牌 (发牌动画只放在新牌上) */
+const dealtOrderOf = (next: GameState, prev: GameState): Record<string, number> => {
+  const map: Record<string, number> = {};
+  next.tableau.forEach((pile, col) => {
+    if (pile.length <= (prev.tableau[col]?.length ?? 0)) return;
+    const card = pile[pile.length - 1];
+    // 逐张发一轮: 间隔放大到 3 个错开单位, 视觉上能看清是一张一张落下来的
+    if (card) map[cardId(card)] = col * DEAL_ROW_STAGGER_STEP;
+  });
+  return map;
+};
+
+/**
+ * 指针位置下的目标列 (靠容器上的 data-drop 标记)。
+ * 优先用命中测试; 命中不到 (弹层遮挡 / 落在牌与牌之间的缝隙) 时,
+ * 再按列的矩形范围做一次几何判断, 避免「拖到列上了却识别不出目标」。
+ */
+const dropColumnAt = (x: number, y: number): number | null => {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  const readCol = (node: Element | null | undefined): number | null => {
+    const raw = (node as HTMLElement | undefined)?.dataset?.drop;
+    if (!raw) return null;
+    const col = Number(raw);
+    return Number.isFinite(col) ? col : null;
+  };
+  const cols = Array.from(document.querySelectorAll('[data-drop]'));
+  // 先按列的矩形范围判断: 几何位置最可靠 (elementFromPoint 会被弹层 / 指针捕获 / 拖拽层干扰)
+  for (const node of cols) {
+    const rect = node.getBoundingClientRect?.();
+    if (!rect || (!rect.width && !rect.height)) continue;
+    if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+      const col = readCol(node);
+      if (col !== null) return col;
+    }
+  }
+  const doc = document as Document & { elementFromPoint?: (px: number, py: number) => Element | null };
+  if (typeof doc.elementFromPoint === 'function') {
+    let el: Element | null = null;
+    try {
+      el = doc.elementFromPoint(x, y);
+    } catch {
+      el = null;
+    }
+    const direct = readCol(el?.closest?.('[data-drop]'));
+    if (direct !== null) return direct;
+  }
+  // 都没命中 (落在列与列之间的缝隙 / 空列下方一点): 就近吸附最近的一列, 别让用户白拖一趟
+  let best: number | null = null;
+  let bestScore = Infinity;
+  for (const node of cols) {
+    const rect = node.getBoundingClientRect?.();
+    if (!rect || (!rect.width && !rect.height)) continue;
+    const col = readCol(node);
+    if (col === null) continue;
+    const dx = x < rect.left ? rect.left - x : x > rect.right ? x - rect.right : 0;
+    const dy = y < rect.top ? rect.top - y : y > rect.bottom ? y - rect.bottom : 0;
+    if (dx > Math.max(8, rect.width * DROP_SNAP_X)) continue;
+    if (dy > Math.max(8, rect.height * DROP_SNAP_Y)) continue;
+    const score = dx + dy * 0.25;
+    if (score < bestScore) {
+      bestScore = score;
+      best = col;
+    }
+  }
+  return best;
+};
+
+const SpiderSolitaire: React.FC = () => {
+  const { locale } = useLocale();
+  const t = (zh: string) => u(locale, zh);
+  const tT = (zh: string, vars: Record<string, string | number>) => uT(locale, zh, vars);
+  // 全局 pointer 监听是在 effect([]) 里挂的, 用 ref 取最新语言, 避免切语言后提示还是旧文案
+  const localeRef = useRef(locale);
+  useEffect(() => { localeRef.current = locale; }, [ locale ]);
+  const { token } = theme.useToken();
+  // 页面在 KeepAlive 容器中常驻: 只有当前显示本应用时才响应全局键盘事件
+  const appCtx = useContext(AppContext);
+  const active = appCtx ? appCtx.app === 'SpiderSolitaire' : true;
+
+  const [ opts, setOpts ] = useState(() => getDefaultOptions());
+  const [ seed, setSeed ] = useState<number>(() => getLastSeed());
+  const [ seedInput, setSeedInput ] = useState<number | null>(() => getLastSeed());
+  const [ initial ] = useState<GameState>(() => dealFromSeed(getLastSeed(), getDefaultOptions().suits));
+  const [ state, setState ] = useState<GameState>(initial);
+  const [ history, setHistory ] = useState<GameState[]>([]);
+  const [ sel, setSel ] = useState<Selection | null>(null);
+  const [ hint, setHint ] = useState<Move | null>(null);
+  const [ elapsed, setElapsed ] = useState(0);
+  const [ running, setRunning ] = useState(false);
+  const [ won, setWon ] = useState(false);
+  const [ records, setRecords ] = useState<SpiderRecords>(() => getRecords());
+  const [ full, setFull ] = useState(false);
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  /** 计时器回调里要读到最新用时, 用 ref 同步一份 */
+  const elapsedRef = useRef(0);
+  /** 刚发到桌面上的牌 (uid -> 动画顺序), 用来播放发牌动画 */
+  const [ dealAnim, setDealAnim ] = useState<Record<string, number>>(() => dealOrderOf(initial));
+  const dealTimer = useRef<number | null>(null);
+
+  useEffect(() => {
+    elapsedRef.current = elapsed;
+  }, [ elapsed ]);
+
+  const stopDealAnim = useCallback(() => {
+    if (dealTimer.current !== null) {
+      window.clearTimeout(dealTimer.current);
+      dealTimer.current = null;
+    }
+  }, []);
+
+  /** 播一次发牌动画, ms 之后自动清掉标记 (清掉后移动牌就不会重播) */
+  const playDealAnim = useCallback((map: Record<string, number>, ms: number) => {
+    stopDealAnim();
+    setDealAnim(map);
+    if (!Object.keys(map).length) return;
+    dealTimer.current = window.setTimeout(() => {
+      dealTimer.current = null;
+      setDealAnim({});
+    }, ms);
+  }, [ stopDealAnim ]);
+
+  /** 已经结束动画就不再需要标记 (移动 / 撤销 / 收牌时清掉, 免得牌换了位置又飞一次) */
+  const clearDealAnim = useCallback(() => {
+    stopDealAnim();
+    setDealAnim((cur) => (Object.keys(cur).length ? {} : cur));
+  }, [ stopDealAnim ]);
+
+  // 首屏也要有发牌动画: 摆好的牌逐张飞出来
+  useEffect(() => {
+    playDealAnim(dealOrderOf(initial), DEAL_ANIM_TOTAL_MS);
+    return stopDealAnim;
+  }, [ initial, playDealAnim, stopDealAnim ]);
+
+  // ---- 计时 ----
+  useEffect(() => {
+    if (!running || won) return;
+    const id = window.setInterval(() => setElapsed((v) => v + 1000), 1000);
+    return () => window.clearInterval(id);
+  }, [ running, won ]);
+
+  // ---- 移动 ----
+  const pushHistory = useCallback((prev: GameState) => {
+    setHistory((h) => [ ...h, cloneState(prev) ].slice(-HISTORY_LIMIT));
+  }, []);
+
+  const finishIfWin = useCallback((next: GameState, steps: number) => {
+    if (!isWin(next)) return false;
+    setRunning(false);
+    setWon(true);
+    setRecords(recordWin(elapsedRef.current, steps));
+    return true;
+  }, []);
+
+  /** 执行一步移动; 成功返回 true */
+  const commit = useCallback((move: Move): boolean => {
+    const next = applyMove(state, move, { autoCollect: opts.autoCollect });
+    if (!next) return false;
+    pushHistory(state);
+    setState(next);
+    setSel(null);
+    setHint(null);
+    clearDealAnim();
+    if (!running && !won) setRunning(true);
+    finishIfWin(next, next.moves);
+    return true;
+  }, [ state, opts.autoCollect, running, won, pushHistory, finishIfWin, clearDealAnim ]);
+
+  const tryMove = useCallback((from: number, count: number, to: number): boolean => {
+    if (!canMove(state, { from, to, count })) return false;
+    return commit({ from, to, count });
+  }, [ state, commit ]);
+
+  // ---- 拖拽 (鼠标 / 触摸统一走 Pointer Events) ----
+  const tryMoveRef = useRef(tryMove);
+  useEffect(() => {
+    tryMoveRef.current = tryMove;
+  }, [ tryMove ]);
+
+  const [ drag, setDrag ] = useState<DragState | null>(null);
+  const dragRef = useRef<DragState | null>(null);
+  const pendingRef = useRef<Omit<DragState, 'over'> | null>(null);
+  /** 按住了一张「搬不动」的牌 (上方压着不成连牌的牌): 拖动超阀值时提示一次, 不做拖拽 */
+  const blockedRef = useRef<{ x: number; y: number } | null>(null);
+  /** 拖拽刚结束时浏览器还会补一个 click, 用它吞掉, 避免拖完又选中一次 */
+  const suppressClick = useRef(false);
+
+  const clearDrag = useCallback(() => {
+    pendingRef.current = null;
+    blockedRef.current = null;
+    dragRef.current = null;
+    setDrag(null);
+  }, []);
+
+  useEffect(() => {
+    const onMove = (e: PointerEvent) => {
+      const { x, y } = pointerPos(e);
+      const blocked = blockedRef.current;
+      if (blocked) {
+        // 按住的牌搬不动: 移动超阀值后只说清楚原因, 不要一声不响
+        if (Math.abs(x - blocked.x) < DRAG_THRESHOLD && Math.abs(y - blocked.y) < DRAG_THRESHOLD) return;
+        blockedRef.current = null;
+        suppressClick.current = true;
+        window.setTimeout(() => { suppressClick.current = false; }, 0);
+        message.info(u(localeRef.current, '这张牌上方压着不成连牌的牌, 只能移动同花色的降序连牌'));
+        return;
+      }
+      const pending = pendingRef.current;
+      if (!pending) return;
+      const current = dragRef.current;
+      if (!current) {
+        // 未过阀值: 仍然当作点击, 不进入拖拽
+        if (Math.abs(x - pending.x) < DRAG_THRESHOLD && Math.abs(y - pending.y) < DRAG_THRESHOLD) return;
+        const started: DragState = { ...pending, x, y, over: dropColumnAt(x, y) };
+        dragRef.current = started;
+        setDrag(started);
+        setSel(null);
+        setHint(null);
+      } else {
+        const next: DragState = { ...current, x, y, over: dropColumnAt(x, y) };
+        dragRef.current = next;
+        setDrag(next);
+      }
+      if (e.cancelable) e.preventDefault();
+    };
+
+    /**
+     * 松手 / 取消: 只有落到「别的列」才算移动。
+     * 落回原列 (手指抖了一下又放回来) 或取消时当作一次点击, 不能吞掉后面补发的 click,
+     * 否则会表现为「点了牌却选不中」。
+     */
+    const end = (drop: boolean, e?: PointerEvent) => {
+      const started = dragRef.current;
+      pendingRef.current = null;
+      blockedRef.current = null;
+      dragRef.current = null;
+      if (!started) return;
+      setDrag(null);
+      // 松手那一刻的坐标比最后一次 pointermove 更准: 快速拖动时 move 可能还停在半路
+      const atUp = e ? dropColumnAt(e.clientX, e.clientY) : null;
+      const target = drop ? (atUp ?? started.over) : null;
+      if (target === null || target === started.from) return;
+      suppressClick.current = true;
+      window.setTimeout(() => { suppressClick.current = false; }, 0);
+      if (tryMoveRef.current(started.from, started.count, target)) return;
+      // 落点接不住: 明确告诉用户原因, 否则看起来就像「拖不动」
+      message.warning(u(localeRef.current, '这里接不上: 只能放到比它大 1 的牌上'));
+    };
+
+    const onUp = (e: PointerEvent) => end(true, e);
+    const onCancel = () => end(false);
+    /** 窗口失焦 (alt+tab / 拖到窗口外松手) 时可能收不到 pointerup, 兜底清掉拖拽状态 */
+    const onBlur = () => end(false);
+    window.addEventListener('pointermove', onMove, { passive: false });
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, []);
+
+  /** 按下牌面: 先记下候选拖拽, 指针移动超阀值后才真正拖起来 */
+  const startDrag = (
+    col: number,
+    count: number,
+    e: React.PointerEvent<HTMLElement>,
+    blocked = false
+  ) => {
+    // 只响应左键 / 触摸 (jsdom 等环境里 button 可能是 undefined)
+    if (won || (typeof e.button === 'number' && e.button > 0)) return;
+    const { x, y } = pointerPos(e);
+    const pile = state.tableau[col] ?? [];
+    // 这张牌上方压着不成连牌的牌: 搬不动, 但拖动时要给出提示, 不能一声不响
+    if (blocked) {
+      blockedRef.current = { x, y };
+      return;
+    }
+    const cards = pile.slice(Math.max(0, pile.length - count));
+    if (!cards.length || !cards.every((card) => card.faceUp)) return;
+    // 捕获指针: 拖到窗口外松手也能收到 pointerup / pointercancel, 不会卡在拖拽状态
+    try {
+      const el = e.currentTarget as HTMLElement & { setPointerCapture?: (id: number) => void };
+      if (typeof el.setPointerCapture === 'function' && typeof e.pointerId === 'number') {
+        el.setPointerCapture(e.pointerId);
+      }
+    } catch {
+      /* 个别环境不支持指针捕获, 忽略 */
+    }
+    const rect = e.currentTarget.getBoundingClientRect();
+    pendingRef.current = {
+      from: col,
+      count,
+      start: pile.length - count,
+      cards,
+      x,
+      y,
+      offX: Number.isFinite(x) ? Math.max(0, x - rect.left) : 0,
+      offY: Number.isFinite(y) ? Math.max(0, y - rect.top) : 0,
+    };
+  };
+
+  const isDragSource = (col: number, index: number): boolean =>
+    !!drag && drag.from === col && index >= drag.start && index < drag.start + drag.count;
+
+  // ---- 开局 / 重开 ----
+  const startGame = useCallback((n: unknown, suits?: Difficulty) => {
+    const value = normalizeSeed(n);
+    const difficulty = suits ?? state.suits;
+    clearDrag();
+    setSeed(value);
+    setSeedInput(value);
+    setLastSeed(value);
+    const next = dealFromSeed(value, difficulty);
+    setState(next);
+    playDealAnim(dealOrderOf(next), DEAL_ANIM_TOTAL_MS);
+    setHistory([]);
+    setSel(null);
+    setHint(null);
+    setElapsed(0);
+    setRunning(false);
+    setWon(false);
+    setRecords(recordPlay());
+  }, [ clearDrag, state.suits, playDealAnim ]);
+
+  const undo = useCallback(() => {
+    if (!history.length) return;
+    clearDrag();
+    const prev = history[history.length - 1];
+    setHistory(history.slice(0, -1));
+    setState(prev);
+    setSel(null);
+    setHint(null);
+    setWon(false);
+    if (!running && prev.moves > 0) setRunning(true);
+  }, [ history, running, clearDrag ]);
+
+  const dealRow = useCallback(() => {
+    const result = dealStock(state, { strictDeal: opts.strictDeal, autoCollect: opts.autoCollect });
+    if (!result.ok) {
+      message.warning(result.reason === 'empty' ? t('有空列时不能发牌, 先把空列填上') : t('牌堆已经空了'));
+      return;
+    }
+    pushHistory(state);
+    setState(result.state);
+    setSel(null);
+    setHint(null);
+    // 只有新发的 10 张牌播动画
+    playDealAnim(dealtOrderOf(result.state, state), DEAL_ROW_ANIM_TOTAL_MS);
+    if (!running && !won) setRunning(true);
+    finishIfWin(result.state, result.state.moves);
+  }, [ state, opts, running, won, pushHistory, finishIfWin, t, playDealAnim ]);
+
+  const collectNow = useCallback(() => {
+    const { state: next, collected } = collectCompleted(state);
+    if (!collected) {
+      message.info(t('还没有能收的同花顺'));
+      return;
+    }
+    pushHistory(state);
+    setState(next);
+    setSel(null);
+    setHint(null);
+    clearDealAnim();
+    finishIfWin(next, next.moves);
+    message.success(tT('已收 {n} 组', { n: collected }));
+  }, [ state, pushHistory, finishIfWin, t, tT, clearDealAnim ]);
+
+  const showHint = useCallback(() => {
+    const found = findHint(state, opts, true);
+    setSel(null);
+    if (!found) {
+      setHint(null);
+      message.info(t('没有可走的牌'));
+      return;
+    }
+    if ('deal' in found) {
+      setHint(null);
+      message.info(t('没有可接的牌, 试试发一轮牌 (D)'));
+      return;
+    }
+    setHint(found);
+  }, [ state, opts, t ]);
+
+  // ---- 全屏 (原生全屏不可用时用窗口内全屏兜底) ----
+  const exitFull = useCallback(() => {
+    setFull(false);
+    const doc = document as FullscreenDocument;
+    const activeFull = doc.fullscreenElement ?? doc.webkitFullscreenElement;
+    if (!activeFull) return;
+    try {
+      Promise.resolve(doc.exitFullscreen?.() ?? doc.webkitExitFullscreen?.()).catch(() => undefined);
+    } catch {
+      /* 忽略 */
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!full) return;
+    const el = stageRef.current as FullscreenElement | null;
+    const request = el?.requestFullscreen?.bind(el) ?? el?.webkitRequestFullscreen?.bind(el);
+    if (!request) return;
+    try {
+      Promise.resolve(request()).catch(() => undefined);
+    } catch {
+      /* 忽略: CSS 已铺满视口 */
+    }
+  }, [ full ]);
+
+  useEffect(() => {
+    const onChange = () => {
+      const doc = document as FullscreenDocument;
+      if (!doc.fullscreenElement && !doc.webkitFullscreenElement) setFull(false);
+    };
+    document.addEventListener('fullscreenchange', onChange);
+    document.addEventListener('webkitfullscreenchange', onChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', onChange);
+      document.removeEventListener('webkitfullscreenchange', onChange);
+    };
+  }, []);
+
+  // 切到其它工具时自动退出全屏
+  useEffect(() => {
+    if (!active && full) exitFull();
+  }, [ active, full, exitFull ]);
+
+  // ---- 键盘 ----
+  useEffect(() => {
+    if (!active) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (isTypingTarget(e.target as HTMLElement | null)) return;
+      if (e.key === 'Escape') {
+        if (full) exitFull();
+        return;
+      }
+      const action = keyToAction(e);
+      if (!action) return;
+      e.preventDefault();
+      if (action === 'new') startGame(randomSeed());
+      else if (action === 'restart') startGame(seed);
+      else if (action === 'undo') undo();
+      else if (action === 'hint') showHint();
+      else if (action === 'deal') dealRow();
+      else collectNow();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [ active, full, seed, startGame, undo, showHint, dealRow, collectNow, exitFull ]);
+
+  // ---- 点击交互 ----
+  const clickCard = (col: number, index: number) => {
+    if (suppressClick.current || won) return;
+    const card = state.tableau[col]?.[index];
+    if (!card || !card.faceUp) {
+      clickColumn(col);
+      return;
+    }
+    if (sel && sel.col !== col) {
+      if (tryMove(sel.col, sel.count, col)) return;
+    }
+    const run = runFrom(state, col, index);
+    if (!run) {
+      setSel(null);
+      message.info(t('只能移动同花色的降序连牌'));
+      return;
+    }
+    if (sel && sel.col === col && sel.start === index) {
+      setSel(null);
+      return;
+    }
+    setSel({ col, start: index, count: run.length });
+    setHint(null);
+  };
+
+  const clickColumn = (col: number) => {
+    if (suppressClick.current || won) return;
+    if (sel && sel.col !== col) {
+      if (tryMove(sel.col, sel.count, col)) return;
+    }
+    setSel(null);
+  };
+
+  /** 双击: 找一列能接住它的牌桌列放过去 */
+  const doubleClick = (col: number, count = 1) => {
+    if (won || !opts.doubleClick) return;
+    const pile = state.tableau[col] ?? [];
+    const moving = pile[pile.length - count];
+    if (!moving) return;
+    const order = [ ...state.tableau.keys() ].sort(
+      (a, b) => (state.tableau[a].length ? 1 : 0) - (state.tableau[b].length ? 1 : 0)
+    );
+    for (const target of order) {
+      if (target === col) continue;
+      if (tryMove(col, count, target)) return;
+    }
+  };
+
+  // ---- 渲染辅助 ----
+  const selectedCard = (col: number, index: number): boolean =>
+    !!sel && sel.col === col && index >= sel.start && index < sel.start + sel.count;
+
+  /** 拖拽中哪些列接得住这段牌 (高亮出来, 避免拖到接不上的地方白费力气) */
+  const droppable = useMemo(() => {
+    const set = new Set<number>();
+    if (!drag) return set;
+    state.tableau.forEach((_, to) => {
+      if (to === drag.from) return;
+      if (canMove(state, { from: drag.from, to, count: drag.count })) set.add(to);
+    });
+    return set;
+  }, [ drag?.from, drag?.count, state ]);
+
+  const hintKeys = useMemo(() => {
+    const keys = new Set<string>();
+    if (!hint) return keys;
+    const src = state.tableau[hint.from] ?? [];
+    for (const card of src.slice(Math.max(0, src.length - hint.count))) keys.add(cardId(card));
+    const dst = state.tableau[hint.to] ?? [];
+    const dstTop = dst[dst.length - 1];
+    if (dstTop) keys.add(cardId(dstTop));
+    return keys;
+  }, [ hint, state ]);
+
+  const stuck = useMemo(
+    () => !won && state.moves > 0 && isStuck(state, opts),
+    [ state, won, opts ]
+  );
+
+  /** 一张牌的牌面 (ghost = 拖拽时跟随指针的幽灵牌, 不带 testid 以免与牌堆里的重复) */
+  const face = (
+    card: CardData,
+    extra: {
+      selected?: boolean;
+      dragging?: boolean;
+      ghost?: boolean;
+      /** 不能移动的明牌 (不成同花色的降序连牌) */
+      loose?: boolean;
+      style?: React.CSSProperties;
+      onClick?: React.MouseEventHandler;
+      onDoubleClick?: React.MouseEventHandler;
+      onPointerDown?: React.PointerEventHandler<HTMLDivElement>;
+    }
+  ) => {
+    // 刚开始发到桌上的牌带上动画标记 (幽灵牌是复制品, 不播)
+    const order = extra.ghost ? undefined : dealAnim[cardId(card)];
+    const style = order === undefined
+      ? extra.style
+      : { ...(extra.style ?? {}), ['--sp-order' as string]: order } as React.CSSProperties;
+    return (
+    <div
+      key={ cardId(card) }
+      className={ `sp-card ${isRedCard(card) ? 'is-red' : 'is-black'}`
+        + `${card.faceUp ? '' : ' is-down'}${extra.selected ? ' is-selected' : ''}`
+        + `${hintKeys.has(cardId(card)) ? ' is-hint' : ''}`
+        + `${extra.dragging ? ' is-dragging' : ''}${extra.ghost ? ' sp-card-ghost' : ''}`
+        + `${extra.loose ? ' is-loose' : ''}` }
+      style={ style }
+      data-deal={ order === undefined ? undefined : '1' }
+      data-testid={ extra.ghost ? undefined : `card-${cardId(card)}` }
+      data-card={ extra.ghost ? undefined : cardId(card) }
+      data-suit={ extra.ghost ? undefined : card.suit }
+      data-rank={ extra.ghost ? undefined : card.rank }
+      data-up={ extra.ghost ? undefined : (card.faceUp ? '1' : '0') }
+      data-selected={ extra.ghost ? undefined : (extra.selected ? '1' : '0') }
+      onClick={ extra.onClick }
+      onDoubleClick={ extra.onDoubleClick }
+      onPointerDown={ extra.onPointerDown }
+    >
+      { card.faceUp ? (
+        <>
+          <span className="sp-rank">{ RANK_LABEL[card.rank] }{ SUIT_SYMBOL[card.suit] }</span>
+          <span className="sp-suit-big">{ SUIT_SYMBOL[card.suit] }</span>
+          <span className="sp-suit-mini">{ RANK_LABEL[card.rank] }</span>
+        </>
+      ) : null }
+    </div>
+    );
+  };
+
+  const stat = (label: string, value: React.ReactNode, testId: string) => (
+    <div
+      key={ label }
+      style={ {
+        minWidth: 74,
+        padding: '4px 10px',
+        borderRadius: token.borderRadius,
+        background: token.colorFillSecondary,
+        textAlign: 'center',
+      } }
+    >
+      <div style={ { fontSize: 12, color: token.colorTextSecondary, lineHeight: '16px' } }>{ label }</div>
+      <div style={ { fontSize: 17, fontWeight: 700, lineHeight: '24px' } } data-testid={ testId }>{ value }</div>
+    </div>
+  );
+
+  const stageVars = (fullscreen: boolean) => ({
+    '--sp-w': fullscreen ? CARD_SIZE_CSS_FULL : CARD_SIZE_CSS,
+    '--sp-h': `calc(${fullscreen ? CARD_SIZE_CSS_FULL : CARD_SIZE_CSS} * 1.4)`,
+    // 明牌可视条不小于 13px: 窄屏 (手机上 10 列只有 ~28px 宽) 时按比例算出来只有 9px,
+    // 手指一按就落到上面那张牌上, 表现为「多张牌时拖不动」, 所以下面给个下限
+    '--sp-fan-up': `clamp(13px, calc(${fullscreen ? CARD_SIZE_CSS_FULL : CARD_SIZE_CSS} * 0.32), 40px)`,
+    '--sp-fan-down': `clamp(7px, calc(${fullscreen ? CARD_SIZE_CSS_FULL : CARD_SIZE_CSS} * 0.15), 20px)`,
+    '--sp-bg': token.colorBgLayout,
+    '--sp-bar-bg': token.colorBgElevated,
+    '--sp-bar-line': token.colorBorderSecondary,
+    '--sp-card-bg': '#ffffff',
+  }) as React.CSSProperties;
+
+  // ---- 各部分 ----
+  const difficultyOptions = DIFFICULTIES.map((d) => ({
+    value: d,
+    label: d === 1 ? t('一花色 (简单)') : d === 2 ? t('两花色 (中等)') : t('四花色 (困难)'),
+  }));
+
+  const seedNode = (
+    <Space size={ 6 } wrap align="center">
+      <Text type="secondary" style={ { fontSize: 12 } }>{ t('局号') }</Text>
+      <InputNumber
+        size="small"
+        min={ SEED_MIN }
+        max={ SEED_MAX }
+        precision={ 0 }
+        value={ seedInput }
+        onChange={ (v) => setSeedInput(typeof v === 'number' ? v : null) }
+        style={ { width: 116 } }
+        data-testid="spider-seed"
+      />
+      <Tooltip title={ t('难度') }>
+        <Select
+          size="small"
+          style={ { width: 128 } }
+          value={ state.suits }
+          options={ difficultyOptions }
+          onChange={ (v) => {
+            setOpts(patchDefaultOptions({ suits: v }));
+            startGame(seedInput ?? seed, v);
+          } }
+          data-testid="spider-difficulty"
+        />
+      </Tooltip>
+      <Tooltip title={ t('发牌') }>
+        <Button size="small" icon={ <PlaySquareOutlined /> } onClick={ () => startGame(seedInput ?? seed) }>
+          { t('发牌') }
+        </Button>
+      </Tooltip>
+      <Tooltip title={ t('新局 (N)') }>
+        <Button size="small" type="primary" icon={ <PlusCircleOutlined /> } onClick={ () => startGame(randomSeed()) }>
+          { t('新局 (N)') }
+        </Button>
+      </Tooltip>
+      <Tooltip title={ t('重开本局 (R)') }>
+        <Button size="small" icon={ <ReloadOutlined /> } onClick={ () => startGame(seed) }>{ t('重开本局 (R)') }</Button>
+      </Tooltip>
+      <Tooltip title={ t('撤销 (Z)') }>
+        <Button size="small" icon={ <UndoOutlined /> } disabled={ !history.length || won } onClick={ undo }>
+          { t('撤销 (Z)') }
+        </Button>
+      </Tooltip>
+      <Tooltip title={ t('提示 (H)') }>
+        <Button size="small" icon={ <BulbOutlined /> } disabled={ won } onClick={ showHint }>{ t('提示 (H)') }</Button>
+      </Tooltip>
+      <Tooltip title={ t('发一轮牌 (D)') }>
+        <Button
+          size="small"
+          icon={ <DownloadOutlined /> }
+          disabled={ won || !state.stock.length }
+          onClick={ dealRow }
+        >
+          { t('发一轮牌 (D)') }
+        </Button>
+      </Tooltip>
+      <Tooltip title={ t('收牌 (C)') }>
+        <Button size="small" disabled={ won } onClick={ collectNow }>{ t('收牌 (C)') }</Button>
+      </Tooltip>
+    </Space>
+  );
+
+  const statsNode = (
+    <Space size={ 8 } wrap>
+      { stat(t('用时'), formatTime(elapsed), 'stat-time') }
+      { stat(t('步数'), state.moves, 'stat-moves') }
+      { stat(t('已收牌'), `${collectedCount(state)}/${SERIES_COUNT}`, 'stat-collected') }
+    </Space>
+  );
+
+  const recordsNode = (
+    <Space size={ 4 } wrap>
+      <Tag color="blue">{ tT('胜利 {n} 次', { n: records.wins }) }</Tag>
+      <Tag>{ records.bestTimeMs > 0
+        ? tT('最快 {t}', { t: formatTime(records.bestTimeMs) })
+        : t('暂无记录') }</Tag>
+      <Tag>{ records.bestMoves > 0 ? tT('最少 {n} 步', { n: records.bestMoves }) : t('暂无记录') }</Tag>
+    </Space>
+  );
+
+  const stockNode = (
+    <Space size={ 8 } align="center" data-testid="spider-stock-wrap">
+      <div
+        className={ `sp-slot sp-stock${state.stock.length ? '' : ' is-empty'}` }
+        data-testid="spider-stock"
+        data-count={ state.stock.length }
+        onClick={ dealRow }
+        title={ t('发一轮牌 (D)') }
+      >
+        { state.stock.length ? (
+          <div className="sp-card is-down" style={ { cursor: 'pointer' } } />
+        ) : (
+          <Text type="secondary" style={ { fontSize: 11 } }>{ t('牌堆') }</Text>
+        ) }
+      </div>
+      <div>
+        <div style={ { fontSize: 12, color: token.colorTextSecondary } }>
+          { tT('还剩 {n} 张', { n: state.stock.length }) }
+        </div>
+        <div style={ { fontSize: 12, color: token.colorTextSecondary } }>
+          { tT('还能发 {n} 轮', { n: dealsLeft(state) }) }
+        </div>
+      </div>
+      <div style={ { display: 'flex', gap: 4, flexWrap: 'wrap' } } data-testid="spider-done">
+        { Array.from({ length: SERIES_COUNT }, (_, i) => {
+          const suit = state.done[i];
+          return (
+            <div
+              key={ `done-${i}` }
+              className={ `sp-mini${suit ? '' : ' is-empty'}` }
+              data-testid={ `done-${i}` }
+              data-filled={ suit ? '1' : '0' }
+              style={ { color: suit && IS_RED[suit] ? '#cf1322' : '#1f2933' } }
+            >
+              { suit ? `K${SUIT_SYMBOL[suit]}` : '' }
+            </div>
+          );
+        }) }
+      </div>
+    </Space>
+  );
+
+  const boardNode = (
+    <Space direction="vertical" size={ 10 } style={ { width: '100%' } }>
+      <div className="sp-row" style={ { justifyContent: 'space-between' } } data-testid="spider-top">
+        { stockNode }
+      </div>
+      <div className="sp-row" data-testid="spider-tableau">
+        { state.tableau.map((pile, col) => {
+          // 盖着 / 翻开的牌错位不同, 逐张累计偏移 (用 CSS 变量倍数表示, 避免读实际像素)
+          let upBefore = 0;
+          let downBefore = 0;
+          const positions = pile.map((card) => {
+            const at = { up: upBefore, down: downBefore };
+            if (card.faceUp) upBefore += 1;
+            else downBefore += 1;
+            return at;
+          });
+          const last = positions[positions.length - 1] ?? { up: 0, down: 0 };
+          const offsetCss = (p: { up: number; down: number }) =>
+            `calc(${p.up} * var(--sp-fan-up) + ${p.down} * var(--sp-fan-down))`;
+          return (
+            <div
+              key={ `col-${col}` }
+              className={ `sp-col${pile.length ? '' : ' is-empty'}`
+                + `${drag?.over === col ? ' is-drop' : ''}${droppable.has(col) ? ' is-ok' : ''}` }
+              style={ { height: `calc(var(--sp-h) + ${offsetCss(last)})` } }
+              data-testid={ `tableau-${col}` }
+              data-drop={ col }
+              data-count={ pile.length }
+              data-up={ pile.filter((card) => card.faceUp).length }
+              onClick={ () => clickColumn(col) }
+            >
+              { pile.map((card, i) => {
+                const run = card.faceUp ? runFrom(state, col, i) : null;
+                return face(card, {
+                  selected: selectedCard(col, i),
+                  dragging: isDragSource(col, i),
+                  loose: card.faceUp && !run,
+                  style: { position: 'absolute', left: 0, top: offsetCss(positions[i]), zIndex: i },
+                  onPointerDown: (e) => {
+                    startDrag(col, run ? run.length : 1, e, card.faceUp && !run);
+                  },
+                  onClick: (e) => { e.stopPropagation(); clickCard(col, i); },
+                  onDoubleClick: (e) => {
+                    e.stopPropagation();
+                    // 双击连牌里任意一张, 都把整段连牌搬走
+                    if (run) doubleClick(col, run.length);
+                  },
+                });
+              }) }
+            </div>
+          );
+        }) }
+      </div>
+    </Space>
+  );
+
+  const winNode = won ? (
+    <Alert
+      type="success"
+      showIcon
+      message={ t('恭喜通关!') }
+      description={ tT('本局用时 {t}, 共 {n} 步', { t: formatTime(elapsed), n: state.moves }) }
+      action={ (
+        <Space size={ 6 } wrap>
+          <Button size="small" type="primary" onClick={ () => startGame(randomSeed()) }>{ t('再玩一局') }</Button>
+          <Button size="small" onClick={ () => startGame(seed) }>{ t('重玩本局') }</Button>
+        </Space>
+      ) }
+    />
+  ) : null;
+
+  const stuckNode = stuck && !won ? (
+    <Alert
+      type="warning"
+      showIcon
+      message={ t('无路可走, 可撤销 (Z) 或重开本局 (R)') }
+      action={ (
+        <Space size={ 6 }>
+          <Button size="small" disabled={ !history.length } onClick={ undo }>{ t('撤销 (Z)') }</Button>
+          <Button size="small" onClick={ () => startGame(seed) }>{ t('重开本局 (R)') }</Button>
+        </Space>
+      ) }
+    />
+  ) : null;
+
+  const hintText = (
+    <Space direction="vertical" size={ 2 }>
+      <Text type="secondary" style={ { fontSize: 12 } }>{ t('拖动牌到目标列, 或选中牌后点击目标列即可移动') }</Text>
+      <Text type="secondary" style={ { fontSize: 12 } }>{ t('拖动时会高亮可放下的位置, 无效位置会弹回') }</Text>
+      <Text type="secondary" style={ { fontSize: 12 } }>{ t('双击一张牌可自动移到能接住它的列') }</Text>
+      <Text type="secondary" style={ { fontSize: 12 } }>{ t('凑齐 K 到 A 的同花顺会自动收走, 收满 8 组即通关') }</Text>
+      <Text type="secondary" style={ { fontSize: 12 } }>
+        { t('键盘: N 新局 · R 重开本局 · Z 撤销 · H 提示 · D 发一轮牌 · C 收牌') }
+      </Text>
+    </Space>
+  );
+
+  /** 拖拽时跟随指针的幽灵牌层 (fixed 定位, 不接事件, 避免影响 elementFromPoint) */
+  const ghostNode = drag ? (
+    <div
+      className="sp-drag-layer"
+      data-testid="spider-drag"
+      style={ {
+        ...stageVars(full),
+        left: finiteOrUndefined(drag.x - drag.offX),
+        top: finiteOrUndefined(drag.y - drag.offY),
+        width: 'var(--sp-w)',
+        height: drag.cards.length > 1
+          ? `calc(var(--sp-h) + ${drag.cards.length - 1} * var(--sp-fan-up))`
+          : undefined,
+      } }
+    >
+      { drag.cards.map((card, i) => face(card, {
+        ghost: true,
+        style: { top: `calc(${i} * var(--sp-fan-up))` },
+      })) }
+    </div>
+  ) : null;
+
+  // ---- 全屏: 顶部固定工具条 (局号 / 难度 / 发牌 / 新局 / 撤销 ...) + 牌桌 ----
+  if (full) {
+    return (
+      <>
+        <style>{ SP_CSS }</style>
+        <div ref={ stageRef } className="sp-stage sp-full" data-testid="spider-full" style={ stageVars(true) }>
+          <div className="sp-toolbar" data-testid="spider-toolbar">
+            { seedNode }
+            <Button
+              size="small"
+              className="sp-exit"
+              icon={ <FullscreenExitOutlined /> }
+              onClick={ exitFull }
+            >
+              { t('退出全屏') }
+            </Button>
+          </div>
+          <div className="sp-subbar">
+            <Space size={ 12 } wrap align="center">
+              { statsNode }
+              { recordsNode }
+            </Space>
+          </div>
+          { boardNode }
+          { winNode }
+          { stuckNode }
+          <Text type="secondary" style={ { fontSize: 12, textAlign: 'center' } }>{ t('Esc 退出全屏') }</Text>
+          {/* 幽灵牌层必须在全屏元素内部, 否则全屏时会被裁掉 */}
+          { ghostNode }
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <div className="sp-stage" style={ stageVars(false) }>
+      <style>{ SP_CSS }</style>
+      <Space direction="vertical" size={ 16 } style={ { width: '100%' } }>
+        <Card
+          size="small"
+          title={ t('蜘蛛纸牌') }
+          extra={ (
+            <Space size={ 6 } wrap>
+              { recordsNode }
+              <Button size="small" icon={ <FullscreenOutlined /> } onClick={ () => setFull(true) }>{ t('全屏') }</Button>
+            </Space>
+          ) }
+        >
+          <Space direction="vertical" size={ 12 } style={ { width: '100%' } }>
+            <div style={ { display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'space-between', alignItems: 'center' } }>
+              { seedNode }
+              { statsNode }
+            </div>
+            { boardNode }
+            { winNode }
+            { stuckNode }
+            { hintText }
+          </Space>
+        </Card>
+
+        <Divider>{ t('蜘蛛纸牌说明') }</Divider>
+        <SpiderSolitaireIntro />
+      </Space>
+      { ghostNode }
+    </div>
+  );
+};
+
+export default SpiderSolitaire;

@@ -1,0 +1,483 @@
+import '@testing-library/jest-dom';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { message } from 'antd';
+import SensitiveWord from './index';
+import { DEFAULTS_STORAGE_KEY, GZH_BANK, MASK_CHAR_DEFAULT, SAMPLE_TEXT, XHS_BANK } from './data';
+import { maskText, scanText } from './lib';
+import { LEXICON_CATEGORIES, LEXICON_MAP, LEXICON_TOTAL } from './lexicon';
+
+// ---- tauri 桩: 保存文件 ----
+const mockSaveTextFile = jest.fn().mockResolvedValue(true);
+jest.mock('../../lib/bridge', () => ({
+  isDesktopApp: () => false,
+  openUrl: jest.fn(),
+  saveTextFile: (...args: unknown[]) => mockSaveTextFile(...args),
+}));
+
+// ---- 剪贴板桩 (jsdom 没有 navigator.clipboard) ----
+const mockWriteText = jest.fn().mockResolvedValue(undefined);
+
+// ---- DOM 取值助手 ----
+const taEl = (c: HTMLElement) => c.querySelector('textarea.sw-input') as HTMLTextAreaElement;
+const setText = (c: HTMLElement, value: string) => { fireEvent.change(taEl(c), { target: { value } }); };
+const btn = (name: string): HTMLButtonElement => {
+  const target = name.replace(/\s+/g, '');
+  const hit = screen
+    .getAllByText((_, el) => (el?.textContent ?? '').replace(/\s+/g, '') === target)
+    .find((el) => el.closest('button'));
+  if (!hit) throw new Error(`未找到按钮: ${name}`);
+  return hit.closest('button') as HTMLButtonElement;
+};
+/** 工具页本体 (排除底部说明区 .intro) 里的同名文案 */
+const uiTexts = (c: HTMLElement, text: string) =>
+  within(c).queryAllByText(text).filter((el) => !el.closest('.intro'));
+const hasUiText = (c: HTMLElement, text: string) => {
+  expect(uiTexts(c, text).length).toBeGreaterThan(0);
+};
+const rows = (c: HTMLElement) => Array.from(c.querySelectorAll('.sw-table tbody tr'))
+  .filter((tr) => !tr.classList.contains('ant-table-measure-row') && !tr.classList.contains('ant-table-placeholder')) as HTMLTableRowElement[];
+const rowWords = (c: HTMLElement) => rows(c).map((tr) => (tr.querySelector('td')?.textContent ?? '').trim());
+const marks = (c: HTMLElement) => Array.from(c.querySelectorAll('.sw-mark')) as HTMLElement[];
+/** 打码预览: 已打码文本 + 被打码的片段 */
+const maskPreview = (c: HTMLElement) => c.querySelector('.sw-mask-preview') as HTMLElement | null;
+const maskPreviewText = (c: HTMLElement) => maskPreview(c)?.textContent ?? '';
+const maskFills = (c: HTMLElement) => Array.from(c.querySelectorAll('.sw-mask-fill')) as HTMLElement[];
+const switches = (c: HTMLElement) => Array.from(c.querySelectorAll('button.ant-switch')) as HTMLButtonElement[];
+const radios = (c: HTMLElement) => Array.from(c.querySelectorAll('input[type="radio"]')) as HTMLInputElement[];
+const activeTab = (c: HTMLElement) => (c.querySelector('.ant-tabs-tab-active')?.textContent ?? '');
+const cards = (c: HTMLElement) => Array.from(c.querySelectorAll('.sw-card')) as HTMLElement[];
+/** 扩展词库分类选择器 (融合在「通用」页签顶部) */
+const lexSelect = (c: HTMLElement) => c.querySelector('.sw-lexicon-select') as HTMLElement | null;
+const rowCategories = (c: HTMLElement) => rows(c).map((tr) => (tr.querySelectorAll('td')[1]?.textContent ?? '').trim());
+const tableHeads = (c: HTMLElement) => Array.from(c.querySelectorAll('.sw-table thead th'))
+  .map((th) => (th.textContent ?? '').trim());
+const BUILTIN_HEADS = [ '敏感词', '等级', '次数', '位置', '建议替换' ];
+const FUSED_HEADS = [ '敏感词', '分类', '等级', '次数', '位置', '建议替换' ];
+/** 勾选一个扩展词库分类 (多选下拉只能用搜索框过滤到目标选项, 虚拟列表只渲染可视区) */
+const pickLexCategory = async (c: HTMLElement, key: keyof typeof LEXICON_MAP) => {
+  const category = LEXICON_MAP[key];
+  const select = lexSelect(c) as HTMLElement;
+  await act(async () => { fireEvent.mouseDown(select.querySelector('.ant-select-selector') as HTMLElement); });
+  await act(async () => {
+    fireEvent.change(select.querySelector('input.ant-select-selection-search-input') as HTMLInputElement, {
+      target: { value: category.label },
+    });
+  });
+  await clickOption(`${category.label} (${category.count})`);
+};
+const bankTags = (c: HTMLElement) => Array.from(c.querySelectorAll('.sw-bank-list .ant-tag')) as HTMLElement[];
+const scanCommon = (text: string) => scanText(text, { loose: true, latinBoundary: true }).common;
+/** 切换页签 (antd Tabs 用 role=tab) */
+const toTab = (name: RegExp) => {
+  act(() => { fireEvent.click(screen.getByRole('tab', { name })); });
+};
+const clickCopy = async (name: string) => {
+  await act(async () => { fireEvent.click(btn(name)); });
+};
+/** 打码字符组合框 (AutoComplete: 下拉可选, 也可自己填写) */
+const maskInput = (c: HTMLElement) => c.querySelector('.sw-mask-char input') as HTMLInputElement;
+const maskValue = (c: HTMLElement) => maskInput(c)?.value ?? '';
+/** 在组合框里自己填写打码字符 */
+const typeMaskChar = (c: HTMLElement, value: string) => {
+  act(() => { fireEvent.change(maskInput(c), { target: { value } }); });
+};
+const blurMaskChar = (c: HTMLElement) => {
+  act(() => { fireEvent.blur(maskInput(c)); });
+};
+const openMaskSelect = async () => {
+  const selector = document.querySelector('.ant-select-selector') as HTMLElement;
+  await act(async () => { fireEvent.mouseDown(selector); });
+};
+const clickOption = async (text: string) => {
+  const options = Array.from(document.querySelectorAll('.ant-select-item-option-content'));
+  const hit = options.find((o) => (o.textContent ?? '') === text);
+  if (!hit) throw new Error(`找不到选项「${text}」`);
+  await act(async () => { fireEvent.click(hit); });
+};
+
+beforeAll(() => {
+  Object.defineProperty(navigator, 'clipboard', {
+    value: { writeText: (...a: unknown[]) => mockWriteText(...a) },
+    configurable: true,
+  });
+});
+
+beforeEach(() => {
+  mockSaveTextFile.mockClear();
+  mockWriteText.mockClear();
+  localStorage.clear();
+  message.destroy();
+});
+
+describe('敏感词检测 初始界面', () => {
+  test('未输入时显示空状态与说明, 操作按钮不可用', () => {
+    const { container } = render(<SensitiveWord />);
+    expect(taEl(container)).toBeInTheDocument();
+    expect(container.querySelector('.sw-input')).toHaveAttribute('placeholder', '把文案 / 标题 / 商品详情粘贴到这里, 自动检测敏感词');
+    hasUiText(container, '先在上面粘贴一段文案, 这里会立刻给出检测结果');
+    expect(btn('清空')).toBeDisabled();
+    expect(btn('复制打码文本')).toBeDisabled();
+    expect(btn('复制检测报告')).toBeDisabled();
+    expect(btn('保存打码文本')).toBeDisabled();
+    expect(btn('保存检测报告')).toBeDisabled();
+    expect(btn('载入示例')).toBeEnabled();
+    // 没有输入时不展示词库页签
+    expect(container.querySelector('.sw-tabs')).not.toBeInTheDocument();
+    // 默认选项: 宽松匹配 / 拉丁词边界都开, 打码字符 *
+    expect(switches(container)).toHaveLength(2);
+    expect(switches(container)[0]).toHaveClass('ant-switch-checked');
+    expect(switches(container)[1]).toHaveClass('ant-switch-checked');
+    expect(maskValue(container)).toBe(MASK_CHAR_DEFAULT);
+    // 说明区
+    expect(within(container).getByText('这个工具做什么')).toBeInTheDocument();
+  });
+
+  test('设置中心里的默认值会带进工具页', () => {
+    localStorage.setItem(DEFAULTS_STORAGE_KEY, JSON.stringify({
+      bank: 'gzh', loose: false, latinBoundary: false, maskChar: '●',
+    }));
+    const { container } = render(<SensitiveWord />);
+    expect(switches(container)[0]).not.toHaveClass('ant-switch-checked');
+    expect(switches(container)[1]).not.toHaveClass('ant-switch-checked');
+    expect(maskValue(container)).toBe('●');
+    setText(container, '集赞');
+    expect(activeTab(container)).toContain('微信公众号');
+  });
+});
+
+describe('敏感词检测 示例与概览', () => {
+  test('载入示例后展示统计 / 三张卡片 / 三个页签', () => {
+    const { container } = render(<SensitiveWord />);
+    act(() => { fireEvent.click(btn('载入示例')); });
+    expect(taEl(container).value).toBe(SAMPLE_TEXT);
+    const total = scanCommon(SAMPLE_TEXT).total;
+    expect(container.textContent).toContain('命中 ' + total + ' 处');
+    expect(container.textContent).toContain('共 ' + [ ...SAMPLE_TEXT ].length + ' 字');
+    // 卡片与页签
+    expect(cards(container)).toHaveLength(3);
+    expect(screen.getByRole('tab', { name: /^通用/ })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /^小红书/ })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /^微信公众号/ })).toBeInTheDocument();
+    expect(activeTab(container)).toContain('通用');
+    // 默认页签是通用词库, 表格里应有命中行
+    expect(rows(container).length).toBeGreaterThan(3);
+    expect(marks(container).length).toBeGreaterThan(0);
+  });
+
+  test('卡片显示各词库命中数与等级分布', () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '祛斑 仅限今日');
+    expect(cards(container)).toHaveLength(3);
+    cards(container).forEach((card) => expect(card.textContent).toContain('命中 2 处 / 2 个词'));
+    expect(uiTexts(cards(container)[0], '高危 1').length).toBe(1);
+    expect(uiTexts(cards(container)[0], '中危 1').length).toBe(1);
+    // 页签标题带命中数
+    expect(screen.getByRole('tab', { name: '通用 (2)' })).toBeInTheDocument();
+  });
+
+  test('点卡片可以切换页签', () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '祛斑');
+    act(() => { fireEvent.click(cards(container)[1]); });
+    expect(activeTab(container)).toContain('小红书');
+    act(() => { fireEvent.click(cards(container)[2]); });
+    expect(activeTab(container)).toContain('微信公众号');
+  });
+
+  test('清空后回到空状态', () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '祛斑');
+    expect(rows(container).length).toBe(1);
+    act(() => { fireEvent.click(btn('清空')); });
+    expect(taEl(container).value).toBe('');
+    expect(container.querySelector('.sw-tabs')).not.toBeInTheDocument();
+    expect(btn('复制打码文本')).toBeDisabled();
+  });
+});
+
+describe('敏感词检测 词库差异与筛选', () => {
+  test('两个平台的专有词只在各自页签命中', () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '二维码 集赞');
+    // 通用词库 = 并集
+    expect(rowWords(container)).toEqual([ '二维码', '集赞' ]);
+    toTab(/^小红书/);
+    expect(rowWords(container)).toEqual([ '二维码' ]);
+    toTab(/^微信公众号/);
+    expect(rowWords(container)).toEqual([ '集赞' ]);
+  });
+
+  test('等级筛选只保留对应等级的词', () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '祛斑 仅限今日');
+    expect(rowWords(container)).toEqual([ '祛斑', '仅限今日' ]);
+    const rs = radios(container);
+    expect(rs).toHaveLength(4);
+    act(() => { fireEvent.click(rs[1]); });
+    expect(rowWords(container)).toEqual([ '祛斑' ]);
+    act(() => { fireEvent.click(rs[3]); });
+    expect(rowWords(container)).toEqual([]);
+    hasUiText(container, '未命中该词库的敏感词');
+    // 复原
+    act(() => { fireEvent.click(rs[0]); });
+    expect(rowWords(container)).toHaveLength(2);
+  });
+
+  test('高亮预览按等级配色并带建议提示', () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '这款面膜祛斑很棒');
+    const list = marks(container);
+    expect(list).toHaveLength(1);
+    expect(list[0].textContent).toBe('祛斑');
+    expect(list[0]).toHaveClass('sw-mark-high');
+    expect(list[0].getAttribute('title')).toContain('提亮肤色');
+    toTab(/^小红书/);
+    expect(marks(container)).toHaveLength(1);
+  });
+
+  test('未命中时卡片显示未命中, 表格给出空状态', () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '今天天气不错, 出门散步');
+    expect(cards(container)).toHaveLength(3);
+    expect(uiTexts(container, '未命中')).toHaveLength(3);
+    expect(rowWords(container)).toEqual([]);
+    hasUiText(container, '未命中该词库的敏感词');
+    expect(screen.getByRole('tab', { name: '通用 (0)' })).toBeInTheDocument();
+    expect(marks(container)).toHaveLength(0);
+  });
+
+  test('位置列给出行列坐标, 多于 3 处时给出总数', () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '祛斑\n祛斑 祛斑 祛斑');
+    const cell = rows(container)[0].querySelectorAll('td')[3];
+    expect(cell.textContent).toContain('第 1 行第 1 字');
+    expect(cell.textContent).toContain('第 2 行第 1 字');
+    expect(cell.textContent).toContain('等 4 处');
+    expect(rows(container)[0].textContent).toContain('祛斑');
+    expect(rows(container)[0].textContent).toContain('4');
+  });
+
+  test('词库预览展开后列出全部词条, 命中的排在最前', () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '祛斑');
+    toTab(/^小红书/);
+    expect(container.querySelector('.sw-bank-list')).not.toBeInTheDocument();
+    act(() => { fireEvent.click(container.querySelector('.ant-collapse-header') as HTMLElement); });
+    const tags = bankTags(container);
+    expect(tags).toHaveLength(XHS_BANK.length);
+    expect(tags[0].textContent).toBe('祛斑');
+    expect(tags[0]).toHaveClass('ant-tag-red');
+    // 未命中的词条也会列出 (乱序取一个不在示例文案里的词)
+    expect(tags.map((el) => el.textContent)).toContain(GZH_BANK.length > 0 ? '绝绝子' : '');
+  });
+});
+
+describe('敏感词检测 匹配选项', () => {
+  test('关闭宽松匹配后夹了间隔符的写法不再命中', () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '微 信');
+    expect(rowWords(container)).toEqual([ '微信' ]);
+    act(() => { fireEvent.click(switches(container)[0]); });
+    expect(rowWords(container)).toEqual([]);
+    expect(marks(container)).toHaveLength(0);
+  });
+
+  test('关闭拉丁词边界后会命中英文单词里的字母词', () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, 'version 2.0');
+    expect(rowWords(container)).toEqual([]);
+    act(() => { fireEvent.click(switches(container)[1]); });
+    expect(rowWords(container)).toEqual([ 'v' ]);
+  });
+
+  test('下拉选择打码字符后复制的打码文本随之变化', async () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '祛斑');
+    await openMaskSelect();
+    await clickOption('●');
+    expect(maskValue(container)).toBe('●');
+    await clickCopy('复制打码文本');
+    expect(mockWriteText).toHaveBeenCalledWith('●●');
+  });
+
+  test('打码字符也可自己填写 (自定义单字符)', async () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '祛斑');
+    typeMaskChar(container, '＃');
+    expect(maskValue(container)).toBe('＃');
+    await clickCopy('复制打码文本');
+    expect(mockWriteText).toHaveBeenCalledWith('＃＃');
+
+    // 自己填写 emoji 等字符同样生效
+    typeMaskChar(container, '🙈');
+    await clickCopy('复制打码文本');
+    expect(mockWriteText).toHaveBeenLastCalledWith('🙈🙈');
+  });
+
+  test('组合框只保留 1 个字符, 清空后失焦回退默认字符', () => {
+    const { container } = render(<SensitiveWord />);
+    typeMaskChar(container, '●×');
+    expect(maskValue(container)).toBe('●');
+    typeMaskChar(container, '');
+    expect(maskValue(container)).toBe('');
+    blurMaskChar(container);
+    expect(maskValue(container)).toBe(MASK_CHAR_DEFAULT);
+  });
+});
+
+describe('敏感词检测 打码预览', () => {
+  test('默认展示打码后的文本, 并随打码字符实时更新', () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '祛斑');
+    expect(maskPreviewText(container)).toBe('**');
+    expect(maskFills(container)).toHaveLength(1);
+    const word = scanCommon('祛斑').words[0];
+    expect(maskFills(container)[0]).toHaveAttribute('title', `${word.word} · 高危 · ${word.tip}`);
+    hasUiText(container, '打码 1 处 / 2 字');
+    hasUiText(container, '原文共 2 字');
+    // 换打码字符后预览跟着变
+    typeMaskChar(container, '●');
+    expect(maskPreviewText(container)).toBe('●●');
+    hasUiText(container, '按通用词库打码, 打码字符: ●');
+  });
+
+  test('未命中时预览不出现, 提示与原文一致', () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '今天天气不错');
+    expect(maskPreview(container)).not.toBeInTheDocument();
+    expect(maskFills(container)).toEqual([]);
+    hasUiText(container, '文案里没有命中词库的敏感词, 打码后与原文一致');
+  });
+
+  test('已勾选的扩展词库命中同样体现在打码预览', async () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '招聘兼职');
+    await pickLexCategory(container, 'ad');
+    await waitFor(() => expect(maskFills(container)).toHaveLength(2), { timeout: 5000 });
+    expect(maskPreviewText(container)).toBe('****');
+    hasUiText(container, '打码 2 处 / 4 字');
+    hasUiText(container, '按通用词库 + 已勾选扩展词库分类打码, 打码字符: *');
+  });
+
+  test('预览卡片的复制结果按钮取到打码文本', async () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '祛斑');
+    await act(async () => { fireEvent.click(container.querySelector('.sw-mask-copy') as HTMLButtonElement); });
+    expect(mockWriteText).toHaveBeenCalledWith('**');
+    expect(await screen.findByText('已复制打码文本')).toBeInTheDocument();
+  });
+});
+
+describe('敏感词检测 复制与保存', () => {
+  test('复制打码文本按通用词库打码 (含只属于某个平台的词)', async () => {
+    const { container } = render(<SensitiveWord />);
+    const raw = '祛斑 集赞';
+    setText(container, raw);
+    await clickCopy('复制打码文本');
+    expect(mockWriteText).toHaveBeenCalledTimes(1);
+    expect(mockWriteText).toHaveBeenCalledWith('** **');
+    expect(maskText(raw, scanCommon(raw).hits, MASK_CHAR_DEFAULT)).toBe('** **');
+    expect(await screen.findByText('已复制打码文本')).toBeInTheDocument();
+  });
+
+  test('复制检测报告给出中文报告', async () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '祛斑 仅限今日');
+    await clickCopy('复制检测报告');
+    const report = mockWriteText.mock.calls[0][0] as string;
+    expect(report).toContain('敏感词检测报告');
+    expect(report).toContain('祛斑 [高危] ×1');
+    expect(report).toContain('【小红书词库】');
+  });
+
+  test('明细表里的复制按钮可单独取词', async () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '祛斑');
+    await act(async () => {
+      fireEvent.click(container.querySelector('.sw-copy-word') as HTMLButtonElement);
+    });
+    expect(mockWriteText).toHaveBeenCalledWith('祛斑');
+    expect(await screen.findByText('已复制敏感词 祛斑')).toBeInTheDocument();
+  });
+
+  test('保存打码文本 / 检测报告带时间戳文件名', async () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '祛斑');
+    await act(async () => { fireEvent.click(btn('保存打码文本')); });
+    expect(mockSaveTextFile).toHaveBeenCalledTimes(1);
+    const [ maskedName, maskedBody ] = mockSaveTextFile.mock.calls[0] as [ string, string ];
+    expect(maskedName).toMatch(/^sensitive-word-masked-\d{8}-\d{6}\.txt$/);
+    expect(maskedBody).toBe('**');
+    await act(async () => { fireEvent.click(btn('保存检测报告')); });
+    const [ reportName, reportBody ] = mockSaveTextFile.mock.calls[1] as [ string, string ];
+    expect(reportName).toMatch(/^sensitive-word-report-\d{8}-\d{6}\.txt$/);
+    expect(reportBody).toContain('敏感词检测报告');
+  });
+
+  test('粘贴时按输入内容实时更新 (无输入则按钮禁用)', () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '微');
+    expect(rowWords(container)).toEqual([]);
+    setText(container, '微信');
+    expect(rowWords(container)).toEqual([ '微信' ]);
+    expect(btn('复制打码文本')).toBeEnabled();
+  });
+});
+
+describe('敏感词检测 扩展词库融合检查 (Sensitive-lexicon)', () => {
+  test('默认不勾选: 只展示分类数说明, 明细表仍是内置词库', () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '微信');
+    hasUiText(container, `扩展词库 (社区词库, 按上游文件分类): ${LEXICON_CATEGORIES.length} 个分类 / 共 ${LEXICON_TOTAL} 条词条; 勾选后与「通用」词库一起自检, 命中明细多一列「分类」并计入打码与报告; 收录量大且含少量误报, 按需勾选`);
+    expect(lexSelect(container)).toBeInTheDocument();
+    // 没勾选就不融合: 没有「分类」列
+    expect(tableHeads(container)).toEqual(BUILTIN_HEADS);
+    expect(btn('清空选择')).toBeDisabled();
+    expect(btn('全选')).toBeEnabled();
+  });
+
+  test('勾选分类后融合进「通用」同一张明细表, 扩展行带分类', async () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '招聘 兼职');
+    await pickLexCategory(container, 'ad');
+    await waitFor(() => expect(rowWords(container)).toEqual(expect.arrayContaining([ '招聘', '兼职' ])), { timeout: 5000 });
+    // 同一张表: 多一列「分类」, 扩展行标为「广告法」
+    expect(tableHeads(container)).toEqual(FUSED_HEADS);
+    expect(rowCategories(container).slice(-2)).toEqual([ '广告法', '广告法' ]);
+    hasUiText(container, '广告法 2');
+    hasUiText(container, '扩展词库命中 2 处 / 2 个词');
+    // 等级计数与命中处数同步叠加: 「低危 (2)」与卡片 / 页签的总数
+    hasUiText(container, '低危 (2)');
+    expect(cards(container)[0].textContent).toContain('含扩展词库 2 处');
+    expect(cards(container)[0].textContent).toContain('已融合扩展词库 1 个分类');
+    expect(activeTab(container)).toContain('通用 (2)');
+    // 高亮预览也融合在同一处, 悬停提示带上分类
+    const titles = marks(container).map((m) => m.getAttribute('title') ?? '');
+    expect(titles.filter((s) => s.includes('广告法')).length).toBe(2);
+  });
+
+  test('命中的扩展词库词条计入打码文本与检测报告', async () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '招聘兼职');
+    await pickLexCategory(container, 'ad');
+    await waitFor(() => expect(rowWords(container)).toContain('招聘'), { timeout: 5000 });
+    await clickCopy('复制打码文本');
+    expect(mockWriteText).toHaveBeenCalledWith('****');
+    await clickCopy('复制检测报告');
+    const report = mockWriteText.mock.calls[1][0] as string;
+    expect(report).toContain('词库范围: 通用词库 / 小红书词库 / 微信公众号词库 + 扩展词库 (广告法)');
+    expect(report).toContain('【扩展词库 · 广告法】命中 2 处 / 2 个词');
+  });
+
+  test('取消勾选后回到内置词库明细', async () => {
+    const { container } = render(<SensitiveWord />);
+    setText(container, '招聘');
+    await pickLexCategory(container, 'ad');
+    await waitFor(() => expect(rowWords(container)).toContain('招聘'), { timeout: 5000 });
+    await act(async () => { fireEvent.click(btn('清空选择')); });
+    expect(tableHeads(container)).toEqual(BUILTIN_HEADS);
+    expect(rowWords(container)).toEqual([]);
+    expect(cards(container)[0].textContent).toContain('未命中');
+    expect(btn('清空选择')).toBeDisabled();
+  });
+});

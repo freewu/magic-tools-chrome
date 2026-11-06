@@ -1,0 +1,317 @@
+import { Checkbox, Form, Input, Divider, message, Space, Radio, Button, ColorPicker, Row, Col, Tabs } from "antd";
+import { useState } from "react";
+const { TextArea } = Input;
+import { copyTextToClipboard } from "./../../lib"
+import { genColorString, transalte2Hex, detectColorType, calcColorSchemes, getDefaultColorType } from "./lib"
+import { colorTypeList, emptyResult } from "./data"
+import type { RadioChangeEvent } from 'antd';
+import type { Color } from 'antd/es/color-picker';
+import { useLocale } from "../../hook/locale-context";
+import { tr } from "../../i18n/lang";
+import colorLang from "./lang";
+
+const ColorConvert = () => {
+
+  const { locale } = useLocale();
+  const t = (key: string, fallback: string) => tr(colorLang, locale, key, fallback);
+
+  const [ value, setValue ] = useState(''); // 需要转换的颜色值 
+  const [ colorType, setColorType ] = useState(() => getDefaultColorType()); // 输入值的颜色类型 (默认取 设置 → 类型转换 → 颜色格式转换 的默认选中类型, 未设置为 AUTO)
+  const [ placeholder, setPlaceholder ] = useState(() => {
+    // 初始提示跟随默认选中的类型
+    const type = getDefaultColorType();
+    const tips = colorTypeList.find(item => item.value === type)?.placeholder;
+    return tr(colorLang, locale, 'ph_' + type, (tips ?? '') + '');
+  });
+  const [ checked, setChecked ] = useState(false); // 输出大小写
+  const [ colorData, setColorData ] = useState(emptyResult); // 转换的结果
+  const [ notice, contextHolder] = message.useMessage();
+  const [ colorPickerHex, setColorPickerHex ] = useState<Color | string>('#1677ff'); // colorPicker 默认颜色
+  const [ autoDetected, setAutoDetected ] = useState(''); // 自动识别模式下识别到的格式 (空为未识别), 仅用于回显
+  const [ showPercent, setShowPercent ] = useState(false); // 是否显示 % 
+
+  const inputStyle = { cursor: "pointer" };
+
+  // 切换输入颜色类型
+  const onColorTypeChange = ({ target: { value } }: RadioChangeEvent) => {
+    setColorType(value);
+    setValue(''); // 需要把内容清空,类型变了输入的内容也没意义了
+    setColorData(emptyResult);
+    setAutoDetected(''); // 自动识别的结果同样清空
+    // 更新输入提示信息
+    const tips = colorTypeList.find(item => item.value === value)?.placeholder; // 按 value 匹配 (自动识别的 label 与 value 不同)
+    setPlaceholder(t('ph_' + value, (tips ?? '') + ''));
+  };
+
+  // 点击结果框,把结果复制到粘贴板
+  const inputClick = (e :React.MouseEvent<HTMLElement>) => {
+    const txt = (e.target as HTMLInputElement).value.trim();
+    if(txt != "") {
+      copyTextToClipboard(txt);
+      notice.success(t('copyOk', '复制到粘贴板成功！！！'));
+    }
+  };
+
+  const handleCheckboxChange = () => {
+    setChecked(!checked);
+    // 如果要专内容不为空，处理 显示字母的大小问题
+    if ( value.trim() != "") {
+      const result = {
+        "hex": (checked)? colorData.hex.toLowerCase() : colorData.hex.toUpperCase(),
+        "rgb": (checked)? colorData.rgb.toLowerCase() : colorData.rgb.toUpperCase(),
+        "hsl": (checked)? colorData.hsl.toLowerCase() : colorData.hsl.toUpperCase(),
+        "cmyk": (checked)? colorData.cmyk.toLowerCase() : colorData.cmyk.toUpperCase(),
+        "hsv": (checked)? colorData.hsv.toLowerCase() : colorData.hsv.toUpperCase(),
+        "lab": (checked)? colorData.lab.toLowerCase() : colorData.lab.toUpperCase(),
+        "lch": (checked)? colorData.lch.toLowerCase() : colorData.lch.toUpperCase(),
+        "xyz": (checked)? colorData.xyz.toLowerCase() : colorData.xyz.toUpperCase(),
+        "keyword": (checked)? colorData.keyword.toLowerCase() : colorData.keyword.toUpperCase(),
+        "complementaryColor": (checked)? colorData.complementaryColor.toLowerCase() : colorData.complementaryColor.toUpperCase(), 
+      };
+      setColorData(result);
+    }
+  };
+
+  const textAreaChange = (e :React.ChangeEvent<HTMLTextAreaElement>) => {
+    const value = e.target.value.trim();
+    setValue(value);
+    // 输入4个符以上才处理
+    if (value != "" && value.length >= 4) {
+      covertColor(value);
+    } else {
+      setColorData(emptyResult);
+    }
+  }
+
+  const upperLowerTranslate = (str :string) :string => {
+    return checked? str.toUpperCase() : str.toLowerCase()
+  }
+
+  // 由 HEX 生成全部结果行 (与 covertColor 共用; 取色器直接走此路径避免文本回读舍入漂移)
+  const buildResult = (colorHex :string) => {
+    const result = {
+      "hex": upperLowerTranslate(genColorString(colorHex, "HEX")),
+      "rgb": upperLowerTranslate(genColorString(colorHex, "RGB")),
+      "hsl": upperLowerTranslate(genColorString(colorHex, "HSL")),
+      "cmyk": upperLowerTranslate(genColorString(colorHex, "CMYK")),
+      "hsv": upperLowerTranslate(genColorString(colorHex, "HSV")),
+      "lab": upperLowerTranslate(genColorString(colorHex, "LAB")),
+      "lch": upperLowerTranslate(genColorString(colorHex, "LCH")),
+      "xyz": upperLowerTranslate(genColorString(colorHex, "XYZ")),
+      "keyword": upperLowerTranslate(genColorString(colorHex, "KEYWORD")),
+      "complementaryColor": upperLowerTranslate(genColorString(colorHex, "ComplementaryColor")),
+    };
+    setColorData(result);
+  }
+
+  const covertColor = (value :string) => {
+    setValue(value);
+    if (colorType === 'AUTO') {
+      // 自动识别: 先探测输入格式 (识别失败按空结果处理, 与其他格式的非法输入一致)
+      const detected = detectColorType(value);
+      setAutoDetected(detected);
+      buildResult(detected === '' ? '' : transalte2Hex(value, detected));
+      return;
+    }
+    buildResult(transalte2Hex(value, colorType));
+  }
+
+  // 当前输入格式: 自动识别模式下取识别结果 (未识别/取色器选色时按 HEX 处理)
+  const effectiveType = colorType === 'AUTO' ? (autoDetected || 'HEX') : colorType;
+
+  // 把 hex 转成当前输入格式的文本 (输入格式与对应输出格式保持一致; 自动识别模式用识别到的格式)
+  const fmtText = (hex :string) :string => upperLowerTranslate(genColorString(hex, effectiveType));
+
+  // 取色器选择颜色事件: 填入/输出格式跟随当前输入格式 (默认输入 HEX 时仍是 #rrggbb)
+  // 注意: antd ColorPicker onChange 第二参是 css 字符串(如 rgb(87,113,150)), 并非 hex,
+  // 必须用 value.toHexString() 取标准 #rrggbb 才能解析生成配色方案
+  const onColorPickerChange = (value: Color) => {
+    setColorPickerHex(value);
+    // 带 alpha 时 toHexString() 返回 #rrggbbaa, 截取前 7 位以匹配本页支持的 #rrggbb 解析
+    const raw = value.toHexString();
+    const hex = raw.length > 7 ? raw.slice(0, 7) : raw;
+    if (colorType === 'AUTO') setAutoDetected('HEX'); // 取色器无文本可探测, 自动识别按 HEX 回显
+    // 输入框按当前输入格式回填 (LAB 等); 自动识别模式显式用 HEX (不能依赖 state, 本帧 autoDetected 可能仍是上次识别结果)
+    const fillType = colorType === 'AUTO' ? 'HEX' : effectiveType;
+    setValue(upperLowerTranslate(genColorString(hex, fillType)));
+    buildResult(hex);
+  }
+
+  // 切换显示 %
+  const handleShowPercentChange = ()  => {
+    setShowPercent(!showPercent);
+  }
+
+  // ---- 配色方案 ----
+  const schemes = colorData.hex ? calcColorSchemes(colorData.hex) : [];
+
+  // 根据背景色亮度决定前景文字颜色
+  const schemeTextColor = (hex :string) => {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return (0.299 * r + 0.587 * g + 0.114 * b) > 150 ? '#333' : '#fff';
+  };
+
+  const copyHex = (hex :string) => {
+    copyTextToClipboard(hex);
+    notice.success(upperLowerTranslate(hex) + t('copiedSfx', ' 已复制'));
+  };
+
+  const offsetText = (o :number) => o === 0 ? t('schemeMain', '主色') : ((o > 0 ? '+' : '') + o + '°');
+
+  // 输入区: 类型选择 + 颜色输入框 (常驻 Tabs 上方)
+  // 选项标签走 i18n: 仅 "自动识别" 需要翻译 (HEX/RGB 等格式名各语言一致, 缺失时回退原文)
+  const typeOptions = colorTypeList.map((item) => ({ ...item, label: t('type_' + item.value, item.label) }));
+  const inputPane = (
+    <>
+      <Space>
+        <Radio.Group 
+          optionType = "button" buttonStyle="solid"
+          options = { typeOptions } 
+          onChange={ onColorTypeChange } 
+          value={ colorType } 
+        />
+        <Checkbox onChange={ handleCheckboxChange } checked={ checked }>{t('ckUpper', '大写字符显示')}</Checkbox>
+        {/* <Checkbox onChange={ handleShowPercentChange } value={ showPercent }>显示 %</Checkbox> */}
+
+        <ColorPicker
+          format={ 'hex'}
+          value={ colorPickerHex }
+          onChange={ onColorPickerChange }
+        />
+          
+        <Button 
+          onClick={ () => { setValue(''); setColorData(emptyResult); setAutoDetected(''); } }
+          style={ {"backgroundColor" : "#dc3545","color": "#fff" }} 
+        >{t('clear', '清除')}</Button>
+      </Space>
+      <TextArea
+        style={ { margin: "5px 0 5px 0" }}
+        value= { value }
+        onChange={ textAreaChange }
+        placeholder={ placeholder }
+        autoSize={{ minRows: 3, maxRows: 3 }}
+      />
+      { colorType === 'AUTO' && (
+        <div style={ { fontSize: 12, color: '#999', marginBottom: 5 } }>
+          {t('autoTag', '自动识别')}: { autoDetected || '—' }
+        </div>
+      ) }
+    </>
+  );
+
+  // 格式页: 结果区 (结果行包含全部格式, 首行"颜色"大色卡跟随所选输入格式)
+  const formatPane = (
+    <>
+      <Divider dashed />
+      <Row wrap>
+        <Col span={12}>
+          <Form name="basic1" labelCol={{ span: 4 }} autoComplete="off">
+            <Form.Item label={t('lblColor', '颜色')}>
+              <Input readOnly onClick={ inputClick }  
+                style={ { cursor: "pointer", backgroundColor: colorData.hex, color: colorData.complementaryColor } } 
+                value= { colorData.hex ? fmtText(colorData.hex) : '' }/>
+            </Form.Item>
+            <Form.Item label="HEX">
+              <Input readOnly style={ inputStyle } onClick={ inputClick } value= { colorData.hex } />
+            </Form.Item>
+            <Form.Item label="RGB">
+              <Input readOnly style={ inputStyle } onClick={ inputClick } value= { colorData.rgb } />
+            </Form.Item>
+            <Form.Item label="HSL">
+              <Input readOnly style={ inputStyle } onClick={ inputClick } value= { colorData.hsl } />
+            </Form.Item>
+            <Form.Item label="CMYK">
+              <Input readOnly style={ inputStyle } onClick={ inputClick } value= { colorData.cmyk }/>
+            </Form.Item>
+            <Form.Item label="Keyword">
+              <Input readOnly style={ inputStyle } onClick={ inputClick } value= { colorData.keyword } />
+            </Form.Item>
+          </Form>
+        </Col>
+        <Col span={12}>
+          <Form name="basic2" labelCol={{ span: 4 }} autoComplete="off">
+            <Form.Item label={t('lblComp', '互补色')}>
+              <Input 
+                readOnly onClick={ inputClick } 
+                style={ { cursor: "pointer", backgroundColor: colorData.complementaryColor, color: colorData.hex } } 
+                value={ colorData.complementaryColor ? fmtText(colorData.complementaryColor) : '' } 
+              />
+            </Form.Item>
+            <Form.Item label="HSV">
+              <Input readOnly style={ inputStyle } onClick={ inputClick } value= { colorData.hsv }/>
+            </Form.Item>
+            <Form.Item label="LAB">
+              <Input readOnly style={ inputStyle } onClick={ inputClick } value= { colorData.lab }/>
+            </Form.Item>
+            <Form.Item label="LCH">
+              <Input readOnly style={ inputStyle } onClick={ inputClick } value= { colorData.lch }/>
+            </Form.Item>
+            <Form.Item label="XYZ">
+              <Input readOnly style={ inputStyle } onClick={ inputClick } value= { colorData.xyz }/>
+            </Form.Item>
+          </Form>
+        </Col>
+      </Row>
+    </>
+  );
+
+  // 配色方案页: 7 组方案平铺展示, 色块以 HEX 文本呈现 (简洁可读, 不随输入格式变成长文本)
+  const schemePane = (
+    <>
+      <div style={ { marginBottom: 12 } }>
+        <span style={ { fontSize: 12, color: '#999' } }>
+          { t('si_a', '基于主色') } { colorData.hex ? <b>{ upperLowerTranslate(colorData.hex) }</b> : '…' } { t('si_b', ' 的色相旋转生成, 点击色块复制 HEX; ') }{ t('si_gray', '若主色为灰色 (无彩色) 各方案颜色相同属正常现象') }
+        </span>
+      </div>
+      { schemes.length === 0 ? (
+        <div style={ { fontSize: 13, color: '#999' } }>{t('schemeHint', '输入有效颜色后, 自动生成相似 / 分离 / 三角 / 四角 / 方形 / 复合 / 双分离配色')}</div>
+      ) : (
+        <div style={ { display: 'flex', flexDirection: 'column', gap: 18 } }>
+          { schemes.map((s) => (
+            <div key={ s.key }>
+              <div style={ { fontWeight: 600, fontSize: 13, marginBottom: 2 } }>{ t('sl_' + s.key, s.label) }</div>
+              <div style={ { marginBottom: 8, fontSize: 12, color: '#999' } }>{ t('sd_' + s.key, s.desc) }</div>
+              <div style={ { display: 'flex', gap: 8, flexWrap: 'wrap' } }>
+                { s.colors.map((c) => (
+                  <div
+                    key={ c.hex + c.offset }
+                    onClick={ () => copyHex(c.hex) }
+                    title={ upperLowerTranslate(c.hex) + (c.isMain ? t('titleMain', '(主色)') : c.isComplement ? t('titleComp', '(互补)') : '') + t('clickHex', ' · 点击复制 HEX') }
+                    style={ {
+                      flex: 1, minWidth: 96, height: 64, borderRadius: 6, background: c.hex,
+                      cursor: 'pointer', padding: '6px 8px', boxSizing: 'border-box',
+                      display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
+                      color: schemeTextColor(c.hex), fontFamily: 'monospace', fontSize: 12,
+                      boxShadow: 'inset 0 0 0 1px rgba(0,0,0,0.06)',
+                    } }
+                  >
+                    <span>{ upperLowerTranslate(c.hex) }{ c.isMain ? t('mkM', '(主)') : (c.isComplement ? t('mkC', '(补)') : '') }</span>
+                    <span>{ offsetText(c.offset) }</span>
+                  </div>
+                )) }
+              </div>
+            </div>
+          )) }
+        </div>
+      ) }
+    </>
+  );
+
+  return (
+    <div>
+      {contextHolder}
+      {inputPane}
+      <Tabs
+        defaultActiveKey="format"
+        items={ [
+          { key: 'format', label: t('tabFmt', '格式'), children: formatPane },
+          { key: 'scheme', label: t('tabScheme', '配色方案'), children: schemePane },
+        ] }
+      />
+    </div>
+  );
+}
+
+export default ColorConvert;

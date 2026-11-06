@@ -1,0 +1,612 @@
+import { Button, Card, ColorPicker, Divider, Input, Progress, Segmented, Slider, Space, Switch, Tooltip, Typography, message } from 'antd';
+import {
+  ClearOutlined, FileTextOutlined, FullscreenExitOutlined, FullscreenOutlined,
+  PauseCircleOutlined, PlayCircleOutlined, ReloadOutlined, SaveOutlined, StopOutlined,
+} from '@ant-design/icons';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { LocaleId } from '../../i18n/lang';
+import { useLocale } from '../../hook/locale-context';
+import {
+  COUNTDOWN_OPTIONS, FONT_SIZE_MAX, FONT_SIZE_MIN, GUIDE_RATIO_MAX, GUIDE_RATIO_MIN, GUIDE_RATIO_STEP,
+  LINE_HEIGHT_MAX, LINE_HEIGHT_MIN, PAD_RATIO,
+  SPEED_MAX, SPEED_MIN, SPEED_STEP, STAGE_BG, STAGE_DIM_FG, STAGE_FG, STAGE_FOCUS_FG,
+} from './data';
+import {
+  advance, clampFontSize, clampGuideRatio, clampLineHeight, clampSpeed, focusOpacity,
+  formatClock, getDefaultOptions, guideRatioAt, isSameOptions, isSliderTarget, isToggleKey, isTypingTarget,
+  lineCentersOf, lineStepOf, nextSampleScript, normalizeGuideColor, pickSampleScript, progressOf, remainingSeconds,
+  scrollDistance, setDefaultOptions, splitLineAt, splitScript, sweepOf,
+  type LineRect, type PrompterOptions,
+} from './lib';
+import { matchesEggKey, startEgg } from './egg';
+import { u, uT } from './lang';
+import TeleprompterIntro from './intro';
+
+const { Text } = Typography;
+
+const MONO = 'ui-monospace, SFMono-Regular, Consolas, "Courier New", monospace';
+
+// 舞台样式: 用类名而非内联样式 (mask / fixed 定位等前缀属性在各浏览器表现不一致,
+// 交给 CSS 更稳, 也便于测试断言类名)
+const STAGE_CSS = `
+.tp-stage { position: relative; display: flex; flex-direction: column; height: 420px; overflow: hidden; border-radius: 8px; background: ${STAGE_BG}; }
+.tp-stage.tp-full { position: fixed; inset: 0; z-index: 1000; height: auto; border-radius: 0; }
+.tp-view { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; }
+.tp-track { will-change: transform; }
+.tp-text { white-space: pre-wrap; word-break: break-word; font-weight: 600; color: ${STAGE_FG}; }
+.tp-line { padding: 0 8px; margin: 0 -8px; border-radius: 6px; }
+.tp-line-active { color: ${STAGE_FOCUS_FG}; background: rgba(255,255,255,0.05); }
+.tp-guide { position: absolute; left: 0; right: 0; height: 2px; z-index: 3; pointer-events: none; }
+.tp-guide-hit { position: absolute; left: 0; right: 0; height: 22px; z-index: 4; cursor: ns-resize; touch-action: none; }
+.tp-guide-tip { position: absolute; right: 8px; z-index: 5; padding: 1px 6px; border-radius: 4px; background: rgba(0,0,0,0.62); color: #fff; font-size: 11px; pointer-events: none; }
+.tp-guide::before, .tp-guide::after { content: ''; position: absolute; top: -3px; width: 10px; height: 8px; background: inherit; }
+.tp-guide::before { left: 0; }
+.tp-guide::after { right: 0; }
+.tp-lit { color: ${STAGE_FOCUS_FG}; text-shadow: 0 2px 16px rgba(255,255,255,0.18); }
+.tp-rest { color: ${STAGE_DIM_FG}; }
+.tp-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 8px 12px; background: rgba(255,255,255,0.06); border-top: 1px solid rgba(255,255,255,0.12); }
+.tp-fade { -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 14%, #000 86%, transparent 100%); mask-image: linear-gradient(to bottom, transparent 0%, #000 14%, #000 86%, transparent 100%); }
+.tp-count { position: absolute; inset: 0; z-index: 6; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; background: rgba(16,17,20,0.82); }
+.tp-count-num { font-size: 96px; font-weight: 700; color: #fff; line-height: 1; text-shadow: 0 6px 32px rgba(22,119,255,0.45); }
+.tp-count-label { color: #9aa0a8; font-size: 14px; letter-spacing: 3px; }
+`;
+
+/** 全屏 API 在部分内嵌 webview / 老浏览器上不存在, 统一按可选处理 */
+type FullscreenElement = HTMLDivElement & { webkitRequestFullscreen?: () => Promise<void> | void };
+type FullscreenDocument = Document & {
+  webkitFullscreenElement?: Element | null;
+  webkitExitFullscreen?: () => Promise<void> | void;
+};
+
+/**
+ * 口令彩蛋里的字取自应用中心: 按当前语言取全部应用名
+ * 用动态导入 (而非顶部 import) 拿应用列表: 应用外壳里有顶层 await, 静态引入会拖累工具页单测
+ */
+const loadEggNames = async (locale: LocaleId): Promise<string[]> => {
+  try {
+    const [ shell, i18n ] = await Promise.all([ import('../index'), import('../app-i18n') ]);
+    return shell.appList
+      .map((item) => i18n.appNameOf(locale, item.key, item.label))
+      .filter((name) => name.trim() !== '');
+  } catch {
+    return [];
+  }
+};
+
+const Teleprompter: React.FC = () => {
+  const { locale } = useLocale();
+  const t = (zh: string) => u(locale, zh);
+  const tt = (zh: string, vars?: Record<string, string | number>) => uT(locale, zh, vars);
+
+  // 打开时按保存的默认设置初始化 (默认设置可在 设置中心 或本页「保存为默认设置」中修改)
+  const [ opts, setOpts ] = useState<PrompterOptions>(() => getDefaultOptions());
+  /** 已保存的默认设置: 与当前参数不一致时「保存为默认设置」才可点 */
+  const [ defaults, setDefaults ] = useState<PrompterOptions>(() => getDefaultOptions());
+  // 首次打开的默认稿件: 按当前语言随机取一首示例诗
+  const [ text, setText ] = useState(() => pickSampleScript(locale));
+  const [ playing, setPlaying ] = useState(false);
+  const [ offset, setOffset ] = useState(0);
+  const [ box, setBox ] = useState({ vh: 0, th: 0 }); // 视口高度 / 文本高度 (测量所得)
+  const [ measured, setMeasured ] = useState<LineRect[]>([]); // 每行实测位置 (逐行/逐字高亮用, 未测到时为 0)
+  const [ full, setFull ] = useState(false);
+  /** 开始前倒计时: 非 null 表示正在倒数 (值为当前展示的剩余秒数) */
+  const [ counting, setCounting ] = useState<number | null>(null);
+
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const viewRef = useRef<HTMLDivElement | null>(null);
+  const textRef = useRef<HTMLDivElement | null>(null);
+  /** 倒计时剩余毫秒 (常驻 ref: RAF 帧里按真实时间差扣减, 不依赖 setTimeout) */
+  const countdownMsRef = useRef(0);
+  const lineRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const eggRef = useRef<(() => void) | null>(null); // 彩蛋的退出函数 (退出/卸载时调用)
+  const offsetRef = useRef(0);
+  const distanceRef = useRef(0);
+  const speedRef = useRef(opts.speed);
+  speedRef.current = opts.speed;
+
+  const lines = useMemo(() => splitScript(text), [ text ]);
+  const hasScript = lines.length > 0;
+  const distance = useMemo(() => scrollDistance(box.th, box.vh), [ box.th, box.vh ]);
+  const pad = Math.max(0, Math.round(box.vh * PAD_RATIO));
+  const progress = progressOf(offset, distance);
+  const left = remainingSeconds(offset, distance, opts.speed);
+  const done = distance > 0 && offset >= distance;
+
+  // ---- 逐行焦点 + 逐字高亮: 阅读线压着的那一行按进度从左到右点亮, 其余行按距离衰减透明度 ----
+  const readY = box.vh * opts.guideRatio;
+  // 还没测到行位置时 (首帧 / 无法测量) 按 字号 × 行距 推一份行框出来
+  const lineRects = useMemo(() => {
+    const step = Math.max(1, opts.fontSize * opts.lineHeight);
+    const fallback = lines.map((_, i) => ({ top: pad + step * i, height: step }));
+    return measured.length === lines.length && measured.some((r) => r.height > 0) ? measured : fallback;
+  }, [ measured, lines, pad, opts.fontSize, opts.lineHeight ]);
+  const focusCenters = useMemo(() => lineCentersOf(lineRects), [ lineRects ]);
+  // 当前正在读的行 + 该行已读比例 (进入阅读线时为 0, 离开时为 1)
+  const sweep = useMemo(() => sweepOf(lineRects, offset, readY), [ lineRects, offset, readY ]);
+  const activeIndex = sweep.index;
+  const lineStep = useMemo(
+    () => lineStepOf(focusCenters, opts.fontSize * opts.lineHeight),
+    [ focusCenters, opts.fontSize, opts.lineHeight ],
+  );
+  /** 当前行的强调度: 焦点行 1, 其余行按距离 (单位: 行) 衰减 */
+  const opacityOf = useCallback((i: number): number => {
+    if (!opts.focus) return 1;
+    if (i === activeIndex) return 1;
+    const center = focusCenters[i] ?? pad;
+    return focusOpacity(Math.abs(center - offset - readY) / lineStep);
+  }, [ opts.focus, activeIndex, focusCenters, offset, readY, lineStep, pad ]);
+
+  const patch = useCallback((next: Partial<PrompterOptions>) => {
+    setOpts((prev) => ({ ...prev, ...next }));
+  }, []);
+
+  /**
+   * 基准线上下调整 (拖动): 在舞台上按住这条线上下拖, 直接把线放到视线位置
+   * 拖动中在右侧实时显示百分比, 松手结束; 舞台高度未测量到时不动
+   */
+  const [ draggingGuide, setDraggingGuide ] = useState(false);
+  const onGuidePointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const view = viewRef.current;
+    if (!view) return;
+    e.preventDefault();
+    setDraggingGuide(true);
+    const rect = view.getBoundingClientRect();
+    const height = view.clientHeight || rect.height;
+    const moveTo = (clientY: number) => patch({ guideRatio: guideRatioAt(clientY, rect.top, height) });
+    moveTo(e.clientY);
+    const stop = () => {
+      setDraggingGuide(false);
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', stop);
+      document.removeEventListener('pointercancel', stop);
+    };
+    const onMove = (ev: PointerEvent) => moveTo(ev.clientY);
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', stop);
+    document.addEventListener('pointercancel', stop);
+  }, [ patch ]);
+
+  // 偏移量同时写 ref 与 state: 动画帧里读 ref, 避免闭包拿到过期值
+  const commit = useCallback((next: number) => {
+    offsetRef.current = next;
+    setOffset(next);
+  }, []);
+
+  const reset = useCallback(() => {
+    setPlaying(false);
+    setCounting(null);
+    commit(0);
+  }, [ commit ]);
+
+  // 保存为默认设置: 把当前页面的参数写成本地默认值, 下次打开 (含设置中心) 沿用
+  const canSaveDefaults = !isSameOptions(opts, defaults);
+  const saveDefaults = useCallback(() => {
+    setDefaults(setDefaultOptions(opts));
+    message.success(t('已保存为默认设置, 下次打开提词器时生效'));
+  }, [ opts, t ]);
+
+  // 测量视口与文本高度 → 得到滚动总距离 (尺寸变化时重算, 已在结尾则贴住结尾)
+  useEffect(() => {
+    const measure = () => {
+      const vh = viewRef.current?.clientHeight ?? 0;
+      const th = textRef.current?.offsetHeight ?? 0;
+      const next = scrollDistance(th, vh);
+      distanceRef.current = next;
+      setBox({ vh, th });
+      // 每行中心线位置 (相对舞台; 轨道 padding 已包含在 offsetTop 里)
+      const rects = lineRefs.current
+        .slice(0, lines.length)
+        .map((el) => ({ top: el?.offsetTop ?? 0, height: el?.offsetHeight ?? 0 }));
+      setMeasured((prev) => (
+        prev.length === rects.length && prev.every((r, i) => (
+          Math.abs(r.top - rects[i].top) < 0.5 && Math.abs(r.height - rects[i].height) < 0.5
+        ))
+          ? prev
+          : rects
+      ));
+      if (offsetRef.current > next) commit(next);
+    };
+    measure();
+      const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null;
+    if (ro) {
+      if (viewRef.current) ro.observe(viewRef.current);
+      if (textRef.current) ro.observe(textRef.current);
+    }
+    window.addEventListener('resize', measure);
+    return () => {
+      ro?.disconnect();
+      window.removeEventListener('resize', measure);
+    };
+  }, [ text, opts.fontSize, opts.lineHeight, full, commit ]);
+
+  // 改稿后回到开头 (正在倒计时也一并取消)
+  useEffect(() => {
+    setPlaying(false);
+    setCounting(null);
+    commit(0);
+  }, [ text, commit ]);
+
+  // 倒计时: 从开头点「开始」后先倒数再滚动 (与滚动共用同一条 RAF 时间轴, 测试可手动推进)
+  useEffect(() => {
+    if (counting === null) return;
+    let raf = 0;
+    let last = -1; // 首帧只记时间, 不扣减
+    const tick = (ts: number) => {
+      const dt = last < 0 ? 0 : Math.min(200, Math.max(0, ts - last));
+      last = ts;
+      const ms = countdownMsRef.current - dt;
+      if (ms <= 0) {
+        countdownMsRef.current = 0;
+        setCounting(null);
+        setPlaying(true);
+        return;
+      }
+      countdownMsRef.current = ms;
+      setCounting(Math.ceil(ms / 1000));
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [ counting ]);
+
+  // 滚动动画: requestAnimationFrame 推进, 速度实时读 ref (拖动滑块不打断播放)
+  useEffect(() => {
+    if (!playing) return;
+    let raf = 0;
+    let last = -1; // -1 表示首帧 (首帧只记时间, 不推进, 避免时间戳为 0 时被当成"已初始化")
+    const tick = (ts: number) => {
+      const dt = last < 0 ? 0 : Math.min(200, Math.max(0, ts - last)); // 切到后台再回来时不要一次跳很远
+      last = ts;
+      const step = advance(offsetRef.current, distanceRef.current, speedRef.current, dt);
+      commit(step.offset);
+      if (step.done) {
+        setPlaying(false);
+        return;
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [ playing, commit ]);
+
+  // ---- 内置口令彩蛋: 稿件内容正好是口令时, 「开始」不滚动, 改为铺一层应用名雨 (点按 / Esc / 空格退出) ----
+  const startEggRain = useCallback(async () => {
+    const names = await loadEggNames(locale);
+    // 全屏时只有全屏元素内的内容可见, 所以优先挂在全屏元素上
+    const host = (document.fullscreenElement as HTMLElement | null) ?? document.body;
+    eggRef.current = startEgg({
+      win: window,
+      doc: document,
+      host,
+      names,
+      raf: (cb) => window.requestAnimationFrame(cb),
+      caf: (id) => window.cancelAnimationFrame(id),
+      done: () => { eggRef.current = null; },
+    });
+  }, [ locale ]);
+
+  // 离开页面时收掉还在播放的彩蛋 (避免动画帧与画布残留)
+  useEffect(() => () => eggRef.current?.(), []);
+
+  const toggle = useCallback(() => {
+    if (!hasScript) return;
+    if (playing) {
+      setPlaying(false);
+      return;
+    }
+    if (eggRef.current) {
+      eggRef.current(); // 彩蛋正在播放: 再按一次 (开始 / 空格) 先收掉它
+      return;
+    }
+    if (matchesEggKey(text)) {
+      void startEggRain();
+      return;
+    }
+    if (counting !== null) {
+      setCounting(null); // 倒计时进行中: 再点一次取消
+      return;
+    }
+    if (offsetRef.current >= distanceRef.current) commit(0); // 播完后再点: 从头开始
+    // 从开头开始时按设定秒数倒数: 留出时间看向镜头 / 做好准备 (暂停恢复不倒数)
+    if (opts.countdown > 0 && offsetRef.current === 0) {
+      countdownMsRef.current = opts.countdown * 1000;
+      setCounting(opts.countdown);
+      return;
+    }
+    setPlaying(true);
+  }, [ hasScript, playing, counting, text, startEggRain, commit, opts.countdown ]);
+
+  // ---- 全屏: 先请求原生全屏, 失败 (内嵌 webview / 非用户手势) 时用窗口内全屏兜底 ----
+  const enterFull = useCallback(() => {
+    setFull(true);
+    const el = stageRef.current as FullscreenElement | null;
+    const request = el?.requestFullscreen?.bind(el) ?? el?.webkitRequestFullscreen?.bind(el);
+    if (!request) return;
+    try {
+      Promise.resolve(request()).catch(() => undefined);
+    } catch {
+      /* 忽略: 已有 CSS 全屏兜底 */
+    }
+  }, []);
+
+  const exitFull = useCallback(() => {
+    setFull(false);
+    const doc = document as FullscreenDocument;
+    const active = doc.fullscreenElement ?? doc.webkitFullscreenElement;
+    if (!active) return;
+    try {
+      Promise.resolve(doc.exitFullscreen?.() ?? doc.webkitExitFullscreen?.()).catch(() => undefined);
+    } catch {
+      /* 忽略 */
+    }
+  }, []);
+
+  // 用户按 Esc / 系统快捷键退出原生全屏时同步状态
+  useEffect(() => {
+    const onChange = () => { if (!document.fullscreenElement) setFull(false); };
+    document.addEventListener('fullscreenchange', onChange);
+    return () => document.removeEventListener('fullscreenchange', onChange);
+  }, []);
+
+  // 快捷键: 空格 开始/暂停, ↑↓ 调速, Esc 退出窗口内全屏
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      const typing = isTypingTarget(el); // 文本输入框: 空格应保留为普通输入
+      const onSlider = isSliderTarget(el); // 滑块手柄: 方向键归滑块
+      // 输入框内空格是正常输入, 不抢键; 但正在播放时允许用空格暂停
+      if (isToggleKey(e) && (!typing || playing || counting !== null || full)) {
+        e.preventDefault();
+        toggle();
+        return;
+      }
+      if ((typing || onSlider) && !full) return;
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        const up = e.key === 'ArrowUp';
+        // Shift + ↑↓: 上下移动阅读基准线 (线在舞台里的高度)
+        if (e.shiftKey) {
+          const step = GUIDE_RATIO_STEP * 2 * (up ? -1 : 1);
+          patch({ guideRatio: clampGuideRatio(opts.guideRatio + step) });
+          return;
+        }
+        patch({ speed: clampSpeed(opts.speed + (up ? SPEED_STEP : -SPEED_STEP)) });
+        return;
+      }
+      if (e.key === 'Escape' && full && !document.fullscreenElement) exitFull();
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [ toggle, playing, counting, full, opts.speed, opts.guideRatio, patch, exitFull ]);
+
+  const stageClass = `tp-stage${full ? ' tp-full' : ''}${opts.fade ? ' tp-fade' : ''}`;
+  const estTotal = distance / Math.max(1, opts.speed);
+
+  return (
+    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+      <style>{STAGE_CSS}</style>
+
+      <Card
+        size="small"
+        title={t('提词脚本')}
+        extra={
+          <Space size={8}>
+            <Tooltip title={t('随机换一首示例 (中英文各有两首示范诗)')}>
+              <Button size="small" icon={<FileTextOutlined />} onClick={() => setText((cur) => nextSampleScript(locale, cur))}>{t('载入示例')}</Button>
+            </Tooltip>
+            <Button size="small" danger icon={<ClearOutlined />} disabled={!text} onClick={() => setText('')}>{t('清空')}</Button>
+          </Space>
+        }
+      >
+        <Input.TextArea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder={t('在此粘贴或输入提词脚本…')}
+          style={{ minHeight: 170, fontFamily: MONO, fontSize: 14, lineHeight: 1.7, resize: 'vertical' }}
+        />
+        <div style={{ marginTop: 6, color: '#888', fontSize: 12 }}>
+          {tt('{l} 行 / {c} 字符 / 全文约 {time}', { l: lines.length, c: text.length, time: formatClock(estTotal) })}
+        </div>
+        <Space size={24} wrap style={{ marginTop: 12 }}>
+          <Space size={8}>
+            <span style={{ color: '#888' }}>{t('字号')}</span>
+            <Slider
+              min={FONT_SIZE_MIN}
+              max={FONT_SIZE_MAX}
+              value={opts.fontSize}
+              onChange={(v) => patch({ fontSize: clampFontSize(v) })}
+              style={{ width: 150, margin: 0 }}
+            />
+            <Text type="secondary" style={{ fontSize: 12 }}>{`${opts.fontSize} px`}</Text>
+          </Space>
+          <Space size={8}>
+            <span style={{ color: '#888' }}>{t('行距')}</span>
+            <Slider
+              min={LINE_HEIGHT_MIN}
+              max={LINE_HEIGHT_MAX}
+              step={0.1}
+              value={opts.lineHeight}
+              onChange={(v) => patch({ lineHeight: clampLineHeight(v) })}
+              style={{ width: 130, margin: 0 }}
+            />
+            <Text type="secondary" style={{ fontSize: 12 }}>{`${opts.lineHeight.toFixed(1)} x`}</Text>
+          </Space>
+          <Space size={8}>
+            <Switch size="small" checked={opts.fade} onChange={(v) => patch({ fade: v })} />
+            <Tooltip title={t('边缘淡入淡出: 文字在上下边缘渐隐, 更接近真实提词器')}>
+              <span style={{ color: '#888' }}>{t('淡入淡出')}</span>
+            </Tooltip>
+          </Space>
+          <Space size={8}>
+            <Switch size="small" checked={opts.focus} onChange={(v) => patch({ focus: v })} />
+            <Tooltip title={t('逐行焦点: 高亮当前阅读行, 并按阅读进度从左到右逐字点亮; 离它越远的行越透明、颜色越淡')}>
+              <span style={{ color: '#888' }}>{t('逐行高亮')}</span>
+            </Tooltip>
+          </Space>
+          <Space size={8}>
+            <Switch size="small" checked={opts.guide} onChange={(v) => patch({ guide: v })} />
+            <Tooltip title={t('阅读基准线: 在阅读线位置显示一条横线, 方便对准视线; 可自定义颜色, 也可上下调整位置')}>
+              <span style={{ color: '#888' }}>{t('基准线')}</span>
+            </Tooltip>
+            <ColorPicker
+              size="small"
+              disabled={!opts.guide}
+              value={opts.guideColor}
+              onChange={(v) => patch({ guideColor: normalizeGuideColor(v.toHexString()) })}
+            />
+            <Tooltip title={t('基准线位置: 拖动滑块或在舞台上直接上下拖这条线, 把视线定在舒服的高度 (占舞台高度的比例)')}>
+              <span style={{ color: '#888' }}>{t('基准线位置')}</span>
+            </Tooltip>
+            <Slider
+              min={GUIDE_RATIO_MIN}
+              max={GUIDE_RATIO_MAX}
+              step={GUIDE_RATIO_STEP}
+              disabled={!opts.guide}
+              value={opts.guideRatio}
+              onChange={(v) => patch({ guideRatio: clampGuideRatio(v) })}
+              style={{ width: 110, margin: 0 }}
+              tooltip={{ formatter: (v) => `${Math.round((v ?? 0) * 100)}%` }}
+            />
+            <Text type="secondary" style={{ fontSize: 12 }}>{`${Math.round(opts.guideRatio * 100)}%`}</Text>
+          </Space>
+          <Space size={8}>
+            <Tooltip title={t('开始前先倒数, 留出时间看向镜头 / 做好准备; 再点一次「开始」或按空格可取消')}>
+              <span style={{ color: '#888' }}>{t('倒计时')}</span>
+            </Tooltip>
+            <Segmented
+              size="small"
+              value={opts.countdown}
+              onChange={(v) => patch({ countdown: Number(v) })}
+              options={COUNTDOWN_OPTIONS.map((n) => ({ value: n, label: n === 0 ? t('关闭') : tt('{n} 秒', { n }) }))}
+            />
+          </Space>
+          <Tooltip title={t('把当前的速度 / 字号 / 行距 / 淡入淡出 / 逐行高亮 / 基准线(颜色·位置) / 倒计时存为默认值, 下次打开时沿用; 也可在 设置 → 其它 → 提词器 中修改')}>
+            {/* 按钮 disabled 时自身不响应鼠标, 用 span 包一层保证提示仍可弹出 */}
+            <span style={{ display: 'inline-block' }}>
+              <Button
+                size="small"
+                icon={<SaveOutlined />}
+                disabled={!canSaveDefaults}
+                onClick={saveDefaults}
+              >
+                {t('保存为默认设置')}
+              </Button>
+            </span>
+          </Tooltip>
+        </Space>
+      </Card>
+
+      <Card
+        size="small"
+        title={t('提词器')}
+        extra={<Text type="secondary" style={{ fontSize: 12 }}>{t('空格 开始/暂停/取消倒计时 · ↑↓ 调速 · Shift+↑↓ 移动基准线 · Esc 退出全屏')}</Text>}
+      >
+        <div ref={stageRef} className={stageClass}>
+          <div className="tp-view" ref={viewRef}>
+            <div className="tp-track" style={{ transform: `translateY(${-offset}px)`, padding: `${pad}px 0` }}>
+              <div className="tp-text" ref={textRef} style={{ fontSize: opts.fontSize, lineHeight: opts.lineHeight }}>
+                {hasScript
+                  ? lines.map((line, i) => {
+                    // 逐字高亮: 焦点行按阅读进度拆成「已点亮 / 未点亮」两段 (拼接后与原文一致)
+                    const lit = opts.focus && i === activeIndex && line !== '';
+                    const [ head, tail ] = lit ? splitLineAt(line, sweep.progress) : [ '', '' ];
+                    return (
+                      <div
+                        key={i}
+                        ref={(el) => { lineRefs.current[i] = el; }}
+                        className={`tp-line${opts.focus && i === activeIndex ? ' tp-line-active' : ''}`}
+                        style={{ opacity: opacityOf(i) }}
+                      >
+                        {line === ''
+                          ? '\u00A0'
+                          : lit
+                            ? <><span className="tp-lit">{head}</span><span className="tp-rest">{tail}</span></>
+                            : line}
+                      </div>
+                    );
+                  })
+                  : <div style={{ color: '#777' }}>{t('请先在上方输入提词脚本')}</div>}
+              </div>
+            </div>
+            {opts.guide && hasScript && (
+              <>
+                <div className="tp-guide" style={{ top: readY, background: opts.guideColor }} />
+                <div
+                  className="tp-guide-hit"
+                  style={{ top: readY - 11 }}
+                  title={t('按住上下拖动, 调整基准线位置')}
+                  onPointerDown={onGuidePointerDown}
+                />
+                {draggingGuide && (
+                  <div className="tp-guide-tip" style={{ top: Math.max(0, readY - 28) }}>
+                    {`${Math.round(opts.guideRatio * 100)}%`}
+                  </div>
+                )}
+              </>
+            )}
+            {counting !== null && (
+              <div className="tp-count">
+                <div className="tp-count-num">{counting}</div>
+                <div className="tp-count-label">{t('倒计时')}</div>
+              </div>
+            )}
+          </div>
+          <div className="tp-bar">
+            <Button
+              size="small"
+              type="primary"
+              icon={playing ? <PauseCircleOutlined /> : counting !== null ? <StopOutlined /> : <PlayCircleOutlined />}
+              disabled={!hasScript}
+              onClick={toggle}
+            >
+              {playing ? t('暂停') : counting !== null ? t('取消倒计时') : done ? t('重新播放') : t('开始')}
+            </Button>
+            <Button
+              size="small"
+              icon={<ReloadOutlined />}
+              disabled={!hasScript || (offset === 0 && !playing)}
+              onClick={reset}
+            >
+              {t('回到开头')}
+            </Button>
+            <Button
+              size="small"
+              icon={full ? <FullscreenExitOutlined /> : <FullscreenOutlined />}
+              onClick={full ? exitFull : enterFull}
+            >
+              {full ? t('退出全屏') : t('全屏')}
+            </Button>
+            <Space size={6}>
+              <span style={{ color: '#aaa', fontSize: 12 }}>{t('速度')}</span>
+              <Slider
+                min={SPEED_MIN}
+                max={SPEED_MAX}
+                step={SPEED_STEP}
+                value={opts.speed}
+                onChange={(v) => patch({ speed: clampSpeed(v) })}
+                style={{ width: 130, margin: 0 }}
+              />
+              <Text style={{ color: STAGE_FG, fontSize: 12 }}>{`${opts.speed} px/s`}</Text>
+            </Space>
+            <Progress
+              percent={Math.round(progress * 100)}
+              showInfo={false}
+              size="small"
+              strokeColor="#1677ff"
+              trailColor="rgba(255,255,255,0.15)"
+              style={{ flex: '1 1 120px', minWidth: 100, margin: 0 }}
+            />
+            <Text style={{ color: '#aaa', fontSize: 12 }}>
+              {done ? t('播放结束') : counting !== null ? tt('倒计时 {n} 秒', { n: counting }) : tt('剩余 {time}', { time: formatClock(left) })}
+            </Text>
+          </div>
+        </div>
+      </Card>
+
+      <Divider>{t(' 提词器说明 ')}</Divider>
+      <TeleprompterIntro />
+    </Space>
+  );
+};
+
+export default Teleprompter;

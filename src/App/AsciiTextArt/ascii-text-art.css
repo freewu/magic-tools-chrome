@@ -1,0 +1,22 @@
+/* ASCII 文字: 字体选择弹窗 */
+
+.figlet-font-item {
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.figlet-font-item:hover {
+  border-color: #1677ff !important;
+}
+
+.figlet-font-item-active:hover {
+  border-color: #1677ff !important;
+}
+
+.figlet-font-preview {
+  scrollbar-width: thin;
+}
+
+/* 只有字体列表滚动, 上方搜索框 / 首字母快捷查询固定 */
+.figlet-font-list {
+  scrollbar-width: thin;
+}

@@ -1,0 +1,111 @@
+// 颜色类型列表
+const colorTypeList = [
+  { label: '#HEX', value: 'HEX1' },
+  { label: 'HEX', value: 'HEX' },
+  { label: 'RGB', value: 'RGB' },
+  { label: 'RGBA', value: 'RGBA' },
+
+  { label: 'HSL', value: 'HSL' },
+  { label: 'HSLA', value: 'HSLA' },
+  { label: 'CMYK', value: 'CMYK' },
+  
+  { label: 'HSV', value: 'HSV' },
+  { label: 'LAB', value: 'LAB' },
+  { label: 'LCH', value: 'LCH' },
+  { label: 'XYZ', value: 'XYZ' },
+
+  { label: '颜色名称', value: 'TEXT' },
+];
+
+import { 
+  ChinesePainting, 
+  ChineseTraditional, 
+  JapaneseColor,
+  RalClassic,
+  CSSColor, 
+  HKSColor, 
+  NormalRGBColor,
+  MardColor,
+  CocoColor,
+  ArtkalColor,
+  ArtkalMiniColor,
+  PerlerColor,
+  HamaColor,
+  DmcColor,
+} from "./data/index"
+
+// 颜色数据
+const colorDataList = [
+  {
+    key: 'chinese-traditional',
+    label: `中国传统色彩`,
+    data: ChineseTraditional
+  },
+  {
+    key: 'chinese-painting',
+    label: `国画常用色彩`,
+    data: ChinesePainting
+  },
+  {
+    key: 'japanese-color',
+    label: `日式配色`,
+    data: JapaneseColor
+  },
+  {
+    key: 'ral-classic',
+    label: `Ral Classic`,
+    data: RalClassic
+  },
+  {
+    key: 'css-color',
+    label: `CSS颜色表`,
+    data: CSSColor
+  },
+  {
+    key: 'hks-color',
+    label: `HKS Color`,
+    data: HKSColor
+  },
+  {
+    key: 'normal-rgb-color',
+    label: `Normal RGB Color`,
+    data: NormalRGBColor
+  },
+  {
+    key: 'mard',
+    label: `MARD 221 拼豆`,
+    data: MardColor
+  },
+  {
+    key: 'coco',
+    label: `COCO 291 拼豆`,
+    data: CocoColor
+  },
+  {
+    key: 'artkal',
+    label: `Artkal 拼豆`,
+    data: ArtkalColor
+  },
+  {
+    key: 'artkal-mini',
+    label: `Artkal Mini 拼豆`,
+    data: ArtkalMiniColor
+  },
+  {
+    key: 'perler',
+    label: `Perler 拼豆`,
+    data: PerlerColor
+  },
+  {
+    key: 'hama',
+    label: `Hama 拼豆`,
+    data: HamaColor
+  },
+  {
+    key: 'dmc',
+    label: `DMC 绣线`,
+    data: DmcColor
+  },
+];
+
+export { colorTypeList, colorDataList };
