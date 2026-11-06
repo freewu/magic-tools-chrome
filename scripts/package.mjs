@@ -4,6 +4,7 @@
 // 产物: release/magic-tools-chrome-v<version>.zip
 //
 // 用法: npm run package   (= vite build && node scripts/package.mjs)
+//      VERSION=2.26.0 npm run package   # CI 里用 tag 覆盖产物名 (扩展内版本仍以 manifest.json 为准)
 
 import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
@@ -12,12 +13,40 @@ import { deflateRawSync } from 'node:zlib';
 const ROOT = process.cwd();
 const DIST = resolve(ROOT, 'dist');
 const pkg = JSON.parse(readFileSync(resolve(ROOT, 'package.json'), 'utf8'));
+const VERSION = process.env.VERSION ?? pkg.version;
 const OUT_DIR = resolve(ROOT, 'release');
-const OUT = resolve(OUT_DIR, `magic-tools-chrome-v${pkg.version}.zip`);
+const OUT = resolve(OUT_DIR, `magic-tools-chrome-v${VERSION}.zip`);
 
 if (!existsSync(DIST)) {
   console.error('dist/ 不存在, 请先执行 npm run build');
   process.exit(1);
+}
+
+// ---------------- 版本与产物自检 ----------------
+// 扩展的真实版本由 manifest.json 决定, 发版时 (tag) 必须与 package.json / VERSION 三者一致,
+// 否则会出现「zip 名字叫 2.26.0、装上却还是 2.25.0」这种坑。
+const manifest = existsSync(resolve(DIST, 'manifest.json'))
+  ? JSON.parse(readFileSync(resolve(DIST, 'manifest.json'), 'utf8'))
+  : null;
+
+const fail = (message) => {
+  console.error(`[package] ${message}`);
+  process.exit(1);
+};
+
+if (!/^\d{1,5}(\.\d{1,5}){0,3}$/.test(VERSION)) {
+  fail(`版本号 "${VERSION}" 不是 Chrome 接受的格式 (1~4 段数字, 如 2.25.0)`);
+}
+if (!manifest) fail('dist/manifest.json 缺失, 构建产物不完整');
+if (manifest.version !== VERSION) {
+  fail(
+    `版本不一致: manifest.json = ${manifest.version}, package.json = ${pkg.version}` +
+      (process.env.VERSION ? `, VERSION = ${process.env.VERSION}` : '') +
+      '。请先同步 src/public/manifest.json 与 package.json 的版本号',
+  );
+}
+for (const [size, icon] of Object.entries(manifest.icons ?? {})) {
+  if (!existsSync(resolve(DIST, icon))) fail(`manifest 声明的 ${size}px 图标缺失: dist/${icon}`);
 }
 
 // ---------------- CRC32 (ZIP 校验) ----------------

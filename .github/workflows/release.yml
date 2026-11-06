@@ -1,0 +1,134 @@
+name: Release
+
+# 发布流程:
+#   1) 改版本号: package.json + src/public/manifest.json 保持一致
+#   2) 提交后打 tag 并推送: git tag v2.25.0 && git push origin v2.25.0
+#   3) 本工作流构建 dist/ → 校验 → 打成 zip → 创建 GitHub Release 并附上 zip + sha256
+#
+# 也可以在 Actions 页面手动触发 (workflow_dispatch): 只构建并保留 artifact;
+# 若填了 tag 输入, 则额外创建该 tag 的 Release。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag (形如 v2.25.0); 留空则只构建产物, 不创建 Release'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # 让 npm / vite 在 CI 上少些噪音
+  CI: 'true'
+
+jobs:
+  release:
+    name: 构建并发布
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          # Release 的自动变更日志要用到历史 tag
+          fetch-depth: 0
+
+      - name: 准备 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: 解析版本号
+        id: version
+        run: |
+          set -euo pipefail
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            # tag v2.25.0 -> 2.25.0
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(node -p 'require("./package.json").version')"
+          fi
+          echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "构建版本: ${VERSION}"
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 构建 + 打包
+        env:
+          # scripts/package.mjs 会校验它和 package.json / manifest.json 三者一致
+          VERSION: ${{ steps.version.outputs.value }}
+        run: npm run package
+
+      - name: 校验 zip 内容
+        run: |
+          set -euo pipefail
+          ZIP="release/magic-tools-chrome-v${{ steps.version.outputs.value }}.zip"
+          test -f "$ZIP" || { echo "::error::未生成 $ZIP"; exit 1; }
+          # Chrome 要求 manifest.json 位于 zip 根目录
+          unzip -Z1 "$ZIP" | grep -qx 'manifest.json'
+          unzip -Z1 "$ZIP" | grep -qx 'icons/icon128.png'
+          unzip -tq "$ZIP" > /dev/null
+          echo "文件数: $(unzip -Z1 "$ZIP" | wc -l), 大小: $(du -h "$ZIP" | cut -f1)"
+
+      - name: 生成校验和
+        run: |
+          set -euo pipefail
+          cd release
+          sha256sum "magic-tools-chrome-v${{ steps.version.outputs.value }}.zip" \
+            > "magic-tools-chrome-v${{ steps.version.outputs.value }}.zip.sha256"
+          cat ./*.sha256
+
+      - name: 上传产物 (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: magic-tools-chrome-v${{ steps.version.outputs.value }}
+          path: |
+            release/*.zip
+            release/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 创建 GitHub Release
+        if: github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          FILES=(
+            "release/magic-tools-chrome-v${VERSION}.zip"
+            "release/magic-tools-chrome-v${VERSION}.zip.sha256"
+          )
+          # tag 触发时 tag 已存在, 用 --verify-tag 防止打错位置;
+          # 手动触发时由命令按当前分支创建 tag。
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            # 重跑 (或多个 attempts) 时不重建 Release, 只覆盖上传附件
+            gh release upload "$TAG" "${FILES[@]}" --clobber
+          else
+            if [ "${{ github.ref_type }}" = "tag" ]; then
+              TARGET=(--verify-tag)
+            else
+              TARGET=(--target "${{ github.ref_name }}")
+            fi
+            gh release create "$TAG" \
+              --title "Magic Tools Chrome 扩展 v${VERSION}" \
+              --generate-notes \
+              "${TARGET[@]}" \
+              "${FILES[@]}"
+          fi
+          echo "已发布: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${TAG}"

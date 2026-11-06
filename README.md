@@ -32,11 +32,41 @@ npm run build          # 产物在 dist/
 
 > `dist/` 就是最终扩展目录：`manifest.json` + `background.js` + 页面资源都在根目录。
 
+扩展图标（`dist/icons/icon{16,32,48,128}.png`）与页面 logo（`dist/logo.png`）在构建期由
+`assets/logo.png` 自动生成（零依赖 Lanczos3 缩放，见 `scripts/icon.mjs`），仓库里没有必要
+再提交一份图标。换品牌图只需替换 `assets/logo.png` 后重新 `npm run build`；想单独看看
+生成结果可执行 `node scripts/icon.mjs /tmp/out`。当前 `assets/logo.png` 是 64×64，
+128 尺寸的图标由它放大而来，换成 ≥128px 的图会更清晰。
+
 打包成商店可分发的 zip：
 
 ```bash
 npm run package        # 生成 release/magic-tools-chrome-v<version>.zip
 ```
+
+## 发布（GitHub Actions）
+
+`.github/workflows/release.yml` 在**推送 tag** 时自动构建并发布，不用本地打包上传：
+
+```bash
+# 1) 先把版本号改成一致的两处: package.json + src/public/manifest.json
+# 2) 提交后打 tag 推送，剩下的交给 Actions
+npm version patch --no-git-tag-version   # 仅示例: 改 package.json 版本
+# 手动把 src/public/manifest.json 的 "version" 改成同一个值，提交
+git commit -am "chore: release v2.26.0"
+git tag v2.26.0
+git push origin main v2.26.0
+```
+
+流水线做的事：`npm ci` → `npm run typecheck` → `npm run package`（内含 `vite build`）→
+校验 zip 根目录有 `manifest.json` 与 `icons/*.png` 并做 CRC 校验 → 生成 `.sha256` →
+上传 artifact → 用 `gh release create --generate-notes` 建 Release，附 `zip` 和 `zip.sha256`。
+
+版本号三处（tag / `package.json` / `src/public/manifest.json`）必须一致，
+否则 `scripts/package.mjs` 会直接报错退出（避免出现 zip 名字与实际安装版本对不上）。
+
+也想手动跑：Actions → **Release** → *Run workflow*，留空 `tag` 就只构建并保留 artifact，
+填了 `tag` 则额外创建对应的 Release。
 
 开发调试（普通 Vite 开发服务器，页面功能与扩展内一致，只是没有 `chrome.*` API）：
 
@@ -57,11 +87,13 @@ src/
   public/              原样拷入产物根目录:
     manifest.json      MV3 清单
     background.js      后台 service worker（图标点击 / 首次安装）
-    icons/             16/32/48/128 扩展图标
-    logo.png, emulatorjs/
-assets/                图标 / 语言包等静态资源（被 src 引用）
+    emulatorjs/
+assets/                品牌图 / 头像 / 语言旗标等静态资源（被 src 引用）
+  logo.png             唯一品牌图: 构建期由它派生扩展图标与页面 logo
+scripts/icon.mjs       零依赖 PNG 工具: 由 logo.png 缩放生成 16/32/48/128 图标
 scripts/package.mjs    零依赖 zip 打包脚本
 vite.config.mts        root=src, publicDir=src/public, target=chrome105
+.github/workflows/    release.yml: 推 tag 自动构建 + 打包 + 发 Release
 ```
 
 ## 与桌面版 / Web 版的差异
