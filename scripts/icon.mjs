@@ -280,17 +280,23 @@ export function resize({ width, height, data }, dstWidth, dstHeight) {
 
 // ---------------- 对外接口 ----------------
 
+/** 页面用的 logo.png 尺寸: 只需盖住启动图 / favicon 的 2x 显示尺寸, 不把大图原样塞进产物 */
+export const PAGE_LOGO_SIZE = 256;
+
 /**
- * 由品牌图生成构建期产物: logo.png (原样) + icons/icon<size>.png (各尺寸)
+ * 由品牌图生成构建期产物: logo.png + icons/icon<size>.png (各尺寸)
  * @returns {Map<string, Buffer>} 相对扩展根目录的文件名 → 内容
  */
 export function buildBrandAssets(logoFile, sizes = ICON_SIZES) {
-  const logo = readFileSync(logoFile);
-  const image = decodePng(logo);
-  const assets = new Map([['logo.png', logo]]);
+  const image = decodePng(readFileSync(logoFile));
+  // 已同尺寸就不重采样, 避免多一次无意义的 alpha 预乘/还原往返
+  const fit = (width, height) =>
+    image.width === width && image.height === height ? image : resize(image, width, height);
+  const pageSize = Math.min(PAGE_LOGO_SIZE, image.width, image.height);
+  const assets = new Map([['logo.png', encodePng(fit(pageSize, pageSize))]]);
   for (const size of sizes) {
     // key 用 / 分隔, 既是扩展内的相对路径也便于开发服务器按 URL 匹配
-    assets.set(`icons/icon${size}.png`, encodePng(resize(image, size, size)));
+    assets.set(`icons/icon${size}.png`, encodePng(fit(size, size)));
   }
   return assets;
 }

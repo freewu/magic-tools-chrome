@@ -35,8 +35,9 @@ npm run build          # 产物在 dist/
 扩展图标（`dist/icons/icon{16,32,48,128}.png`）与页面 logo（`dist/logo.png`）在构建期由
 `assets/logo.png` 自动生成（零依赖 Lanczos3 缩放，见 `scripts/icon.mjs`），仓库里没有必要
 再提交一份图标。换品牌图只需替换 `assets/logo.png` 后重新 `npm run build`；想单独看看
-生成结果可执行 `node scripts/icon.mjs /tmp/out`。当前 `assets/logo.png` 是 64×64，
-128 尺寸的图标由它放大而来，换成 ≥128px 的图会更清晰。
+生成结果可执行 `node scripts/icon.mjs /tmp/out`。`assets/logo.png` 当前是 512×512
+（由 2048 品牌母版降采样而来），图标全部为降采样、不会发糊；`dist/logo.png` 输出为 256×256，
+只会用于启动图 / favicon，不会把大图塞进产物。
 
 打包成商店可分发的 zip：
 
